@@ -4,21 +4,25 @@
 
 Universal LLM compression layer: reduces token count for memory/context injection while preserving semantic equivalence across Claude, GPT, Gemini.
 
+**Repo**: https://github.com/Sudhendra/compression-layer
+
 ## Architecture
 
 ```
 compression-layer/
+├── .github/workflows/  # CI pipeline
 ├── src/
 │   ├── validation/     # Cross-model equivalence testing
 │   ├── generation/     # Compression pair generation
 │   ├── training/       # Unsloth fine-tuning pipeline
 │   ├── inference/      # Production compressor service
 │   └── utils/          # Tokenizers, caching, cost tracking
-├── data/               # Corpora and generated datasets
-├── models/             # Checkpoints, GGUF exports
+├── data/               # Corpora and generated datasets (gitignored)
+├── models/             # Checkpoints, GGUF exports (gitignored)
 ├── configs/            # YAML configs
-├── scripts/            # Entry points
-└── tests/
+├── docs/               # Project documentation
+├── tests/              # Pytest test suite
+└── scripts/            # Entry points
 ```
 
 ## Core Principles
@@ -27,6 +31,65 @@ compression-layer/
 2. **Domain-aware**: Separate strategies for NL, code, mixed
 3. **Cost-conscious**: Cheap models generate, expensive models validate
 4. **Hybrid workflow**: MLX locally (iteration), Tinker cloud (production)
+5. **CI-gated**: All changes require passing lint, typecheck, and tests
+
+## Git Workflow
+
+### Branch Strategy
+Each implementation phase gets its own branch:
+```
+main (protected - requires CI pass)
+  └── phase-1-foundation    ✅ Complete (PR #1)
+  └── phase-2-generation    
+  └── phase-3-training      
+  └── phase-4-inference     
+  └── phase-5-evaluation    
+```
+
+### Per-Phase Workflow
+```bash
+# 1. Start from latest main
+git checkout main && git pull origin main
+
+# 2. Create phase branch
+git checkout -b phase-X-name
+
+# 3. Implement with atomic commits
+git add . && git commit -m "feat: description"
+
+# 4. Run CI checks locally BEFORE pushing
+ruff check src/ tests/
+ruff format --check src/ tests/
+mypy src/ --ignore-missing-imports
+pytest tests/ -v
+
+# 5. Push and create PR
+git push -u origin phase-X-name
+gh pr create --title "Phase X: Name" --body "## Summary\n..."
+
+# 6. CI runs automatically on PR
+# - lint job: ruff check + format
+# - test job: mypy + pytest (Python 3.11 & 3.12)
+
+# 7. After CI passes, merge to main
+gh pr merge --squash
+```
+
+### Commit Message Format
+- `feat:` — New feature
+- `fix:` — Bug fix  
+- `docs:` — Documentation
+- `test:` — Adding tests
+- `refactor:` — Code refactoring
+- `chore:` — Maintenance
+
+### What's Tracked vs Gitignored
+| Tracked | Gitignored |
+|---------|------------|
+| `src/`, `tests/` | `data/` (all subdirs) |
+| `configs/`, `docs/` | `models/`, `adapters/` |
+| `.github/workflows/` | `.env`, `.venv/` |
+| `pyproject.toml` | `*.log`, cache dirs |
 
 ## Agent Guidelines
 
@@ -138,16 +201,26 @@ TINKER_API_KEY=        # For cloud training
 ## Quick Commands
 
 ```bash
-# Local inference (MLX)
+# === GIT & CI ===
+# Run all CI checks locally
+ruff check src/ tests/ && mypy src/ --ignore-missing-imports && pytest tests/ -v
+
+# Create PR for current branch
+gh pr create --title "Phase X: Description" --body "## Summary\n- bullet points"
+
+# Check PR CI status
+gh pr checks
+
+# === LOCAL INFERENCE (MLX) ===
 python -m mlx_lm.generate --model mlx-community/Qwen3-4B-Instruct-4bit --prompt "..."
 
-# Local training (MLX)
+# === LOCAL TRAINING (MLX) ===
 python -m mlx_lm.lora --model mlx-community/Qwen3-4B-Instruct-4bit --train --data ./data
 
-# Cloud training (Tinker)
+# === CLOUD TRAINING (Tinker) ===
 tinker train --model Qwen/Qwen3-8B --dataset compression-v1 --lora-rank 64
 
-# Validate pairs
+# === VALIDATION ===
 python scripts/validate_batch.py --input data/seed/pairs.jsonl
 ```
 
