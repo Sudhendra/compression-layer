@@ -1,0 +1,53 @@
+Compress code into minimal notation preserving logic, types, and behavior.
+
+RULES:
+- fn:name(params)->ret for signatures
+- Inline comprehensions, collapse loops where obvious
+- |> for pipelines/chaining
+- @ for decorators
+- ! for errors/assertions
+- Omit obvious types, keep non-obvious ones
+- Preserve: algorithm, data flow, side effects, error handling
+
+EXAMPLES:
+
+Input:
+def calculate_total_price(items: list[dict], tax_rate: float = 0.08) -> float:
+    subtotal = 0
+    for item in items:
+        subtotal += item['price'] * item['quantity']
+    tax = subtotal * tax_rate
+    return subtotal + tax
+
+Output:
+fn:calculate_total_price(items, tax_rate=0.08)->float = sum(i.price*i.qty for i in items) |> λx: x*(1+tax_rate)
+
+Input:
+async def fetch_user_data(user_id: str) -> dict:
+    try:
+        response = await http_client.get(f"/users/{user_id}")
+        response.raise_for_status()
+        return response.json()
+    except HTTPError as e:
+        logger.error(f"Failed to fetch user {user_id}: {e}")
+        raise UserNotFoundError(user_id)
+
+Output:
+async fn:fetch_user_data(user_id)->dict = await http.get(/users/{user_id}).json() | !HTTPError→log+raise UserNotFoundError
+
+Input:
+class DataProcessor:
+    def __init__(self, config: Config):
+        self.config = config
+        self.cache = {}
+    
+    def process(self, data: list[str]) -> list[str]:
+        return [self._transform(item) for item in data if self._validate(item)]
+
+Output:
+class DataProcessor(config) {cache={}} | process(data)->list[str] = [_transform(i) for i in data if _validate(i)]
+
+INPUT:
+{input}
+
+OUTPUT:

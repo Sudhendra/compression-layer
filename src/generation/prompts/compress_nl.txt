@@ -1,0 +1,25 @@
+Compress the input into minimal tokens while preserving ALL semantic content.
+
+RULES:
+- Remove articles, fillers, syntactic scaffolding
+- Use telegraphic notation: entity | attribute | value
+- Preserve: entities, relations, quantities, time, causality
+- Symbols: → (leads to), ∵ (because), ∴ (therefore), @ (location), # (count)
+- Collapse redundant entity references
+- NO information loss
+
+EXAMPLES:
+
+Input: "John Smith is a senior software engineer at Google who has been working on the search ranking team for the past three years. He previously worked at Microsoft for five years."
+Output: John Smith | sr SWE @ Google | search ranking team | 3yr | prev: Microsoft 5yr
+
+Input: "The quarterly revenue increased by 15% compared to the same period last year, primarily driven by strong performance in the cloud services division which saw a 25% growth."
+Output: Q revenue +15% YoY | driver: cloud services +25%
+
+Input: "The patient presents with persistent headaches occurring three times per week for the past month, accompanied by sensitivity to light and occasional nausea."
+Output: pt: headaches 3x/wk × 1mo | +photosensitivity | +nausea (intermittent)
+
+INPUT:
+{input}
+
+OUTPUT:
