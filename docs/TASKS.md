@@ -47,6 +47,33 @@ Prioritized implementation tasks.
 
 ---
 
+## Phase 2.5: Corpus Loaders ✅ COMPLETE
+
+### P0 — Code Corpus Loader
+- [x] `src/generation/corpus_loader.py` — AST-based Python code extraction
+  - [x] Extract functions, classes, methods
+  - [x] Quality filters (skip trivial, tests, dunders)
+  - [x] Configurable min/max lines and chars
+- [x] `scripts/prepare_corpus.py` — CLI for corpus preparation
+
+### P0 — NL Corpus Formatter
+- [x] `src/generation/md_formatter.py` — Markdown → JSONL converter
+  - [x] Paragraph-based chunking
+  - [x] Strip code blocks, frontmatter
+  - [x] Configurable min/max chars
+- [x] `scripts/format_markdown.py` — CLI for MD formatting
+
+### P1 — Testing
+- [x] `tests/test_corpus_loader.py`
+- [x] `tests/test_md_formatter.py`
+
+### Sample Size Targets
+- **Initial seed**: 200-300 NL + 200-300 code = 400-600 total
+- **V1 training**: 1,500-2,000 each domain = 3,000-4,000 total
+- **V2 scaling**: 5,000+ each domain = 10,000+ total
+
+---
+
 ## Phase 3: Training
 
 ### P0 — Local Setup (MLX)
