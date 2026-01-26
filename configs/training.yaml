@@ -1,0 +1,45 @@
+# Training Pipeline Configuration
+
+# === LOCAL (MLX on M4 Pro) ===
+local:
+  model: "mlx-community/Qwen3-4B-Instruct-4bit"
+  # Alt: mlx-community/Qwen2.5-7B-Instruct-4bit (~12GB)
+  lora:
+    rank: 8 # Lower for local
+    alpha: 16
+  training:
+    iters: 500
+    batch_size: 2
+    learning_rate: 1.0e-4
+
+# === CLOUD (Tinker) ===
+cloud:
+  model: "Qwen/Qwen3-8B"
+  # Alt: Qwen/Qwen3-30B-A3B (MoE, similar cost, more capable)
+  lora:
+    rank: 64
+    alpha: 128
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+  training:
+    epochs: 3
+    batch_size: 4
+    learning_rate: 2.0e-4
+
+# === COST ESTIMATES (Tinker) ===
+# Qwen3-8B: $0.40/1M tokens
+# 10K pairs (~5M tokens) × 3 epochs = ~$6
+# 50K pairs (~25M tokens) × 3 epochs = ~$30
+# 5 training runs total: ~$30-150
+
+# === DATA ===
+data:
+  train_path: "data/validated/train.jsonl"
+  eval_path: "data/validated/test.jsonl"
+  format: "text" # or "chat" for messages format

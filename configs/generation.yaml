@@ -1,0 +1,55 @@
+# Generation Pipeline Configuration
+
+generator:
+  primary_model: "claude-sonnet-4-20250514"
+  fallback_model: "gpt-4o-mini"
+  temperature: 0.4
+  max_retries: 3
+
+validation:
+  models:
+    - "claude-sonnet-4-20250514"
+    - "gpt-4o-mini"
+    - "gemini-2.0-flash"
+  equivalence_threshold: 0.85
+  tasks:
+    - "qa"
+    - "reasoning"
+  concurrency: 10
+
+corpus:
+  nl:
+    sources:
+      - "data/raw/memories/"
+      - "data/raw/conversations/"
+    min_length: 50
+    max_length: 2000
+  code:
+    sources:
+      - "data/raw/code/"
+    languages:
+      - "python"
+      - "typescript"
+      - "sql"
+    min_length: 100
+    max_length: 3000
+
+output:
+  seed_path: "data/seed/pairs.jsonl"
+  validated_path: "data/validated/pairs.jsonl"
+  cache_dir: "data/cache/"
+  costs_log: "data/costs.log"
+
+batching:
+  generation_batch_size: 50
+  validation_batch_size: 20
+  save_interval: 100
+
+cost_limits:
+  max_daily_usd: 50.0
+  warn_at_usd: 30.0
+
+# Local model for cheap candidate generation (Phase 3)
+local_model:
+  name: "unsloth/Qwen3-8B-bnb-4bit"
+  use_for_generation: false # Enable after V1 trained
