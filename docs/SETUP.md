@@ -108,56 +108,47 @@ TINKER_API_KEY=tk_...
 
 ```python
 # src/training/train_tinker.py
-import tinker
-from tinker import LoraConfig, TrainingConfig
+import os
+from tinker import ServiceClient
+from pathlib import Path
 
-# Initialize
-client = tinker.Client()
+from src.training.train_tinker import TinkerTrainingConfig, run_training_loop, write_run_metadata
 
-# Configure training
-config = TrainingConfig(
-    model="Qwen/Qwen3-8B",
-    dataset="path/to/data.jsonl",  # Upload via tinker CLI
-    lora=LoraConfig(
-        r=64,
-        alpha=128,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    ),
-    epochs=3,
-    batch_size=4,
-    learning_rate=2e-4,
+# Initialize SDK clients
+service_client = ServiceClient(api_key=os.environ["TINKER_API_KEY"])
+training_client = service_client.create_lora_training_client(
+    base_model="Qwen/Qwen3-8B",
 )
 
-# Start training
-job = client.train(config)
-print(f"Job ID: {job.id}")
+# Configure training
+config = TinkerTrainingConfig(
+    base_model="Qwen/Qwen3-8B",
+    epochs=3,
+    steps=300,
+)
 
-# Monitor
-job.wait()
-print(f"Final loss: {job.metrics['loss']}")
-
-# Download adapter
-job.download_adapter("./models/tinker_adapter")
+# Run training loop and persist metadata
+metadata = run_training_loop(training_client, config)
+metadata_path = write_run_metadata(metadata, output_dir=Path("models/adapters/tinker"))
+print(f"Run ID: {metadata.run_id}")
+print(f"Run metadata: {metadata_path}")
 ```
 
 ### 2.3 Tinker CLI Workflow
 
 ```bash
-# Upload dataset
-tinker data upload ./data/validated/pairs.jsonl --name compression-v1
-
-# Start training
-tinker train \
-  --model Qwen/Qwen3-8B \
-  --dataset compression-v1 \
-  --lora-rank 64 \
-  --epochs 3
+# Start training (records run metadata under models/adapters/tinker/runs)
+python scripts/train_tinker.py \
+  --config configs/training.yaml \
+  --output models/adapters/tinker
 
 # Check status
-tinker jobs list
+python scripts/train_tinker.py \
+  --status <run-id> \
+  --output models/adapters/tinker
 
-# Download results
-tinker jobs download <job-id> --output ./models/
+# Inspect run metadata
+cat models/adapters/tinker/runs/<run-id>.json
 ```
 
 ### 2.4 Cost Estimation
@@ -221,7 +212,7 @@ python -m mlx_lm.generate --model mlx-community/Qwen3-4B-Instruct-4bit --prompt 
 python -m mlx_lm.lora --model mlx-community/Qwen3-4B-Instruct-4bit --train --data ./data
 
 # Cloud training (production)
-tinker train --model Qwen/Qwen3-8B --dataset compression-v1
+python scripts/train_tinker.py --config configs/training.yaml --output models/adapters/tinker
 
 # Run validation
 python scripts/validate_batch.py --input data/seed/pairs.jsonl
@@ -238,8 +229,9 @@ python scripts/validate_batch.py --input data/seed/pairs.jsonl
 
 ### Tinker job failed
 - Check dataset format (JSONL with `text` or `messages` field)
-- Verify API key: `tinker auth check`
-- Check job logs: `tinker jobs logs <job-id>`
+- Verify API key in `.env` or shell: `TINKER_API_KEY`
+- Inspect run metadata: `models/adapters/tinker/runs/<run-id>.json`
+- Re-run status: `python scripts/train_tinker.py --status <run-id> --output models/adapters/tinker`
 
 ### Slow local inference
 - Ensure using 4-bit model: `*-4bit`

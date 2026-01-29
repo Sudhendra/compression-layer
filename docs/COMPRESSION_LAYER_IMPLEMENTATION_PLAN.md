@@ -395,59 +395,34 @@ class SeedGenerator:
 
 ```python
 # src/training/train_tinker.py
-from tinker import Client, TrainingConfig, LoraConfig
+import os
 from pathlib import Path
-import yaml
 
-def train_on_tinker(config_path: Path, dataset_path: Path, output_dir: Path):
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    
-    client = Client()
-    
-    # Upload dataset
-    dataset_id = client.data.upload(
-        str(dataset_path),
-        name=f"compression-{dataset_path.stem}"
+from tinker import ServiceClient
+
+from src.training.train_tinker import TinkerTrainingConfig, run_training_loop, write_run_metadata
+from src.utils.config import load_tinker_training_config
+
+
+def train_on_tinker(config_path: Path, output_dir: Path) -> Path:
+    config = load_tinker_training_config(config_path)
+    service_client = ServiceClient(api_key=os.environ["TINKER_API_KEY"])
+    training_client = service_client.create_lora_training_client(
+        base_model=config.base_model,
     )
-    
-    # Configure training
-    train_config = TrainingConfig(
-        model=config["model"]["name"],  # "Qwen/Qwen3-8B"
-        dataset=dataset_id,
-        lora=LoraConfig(
-            r=config["lora"]["r"],
-            alpha=config["lora"]["alpha"],
-            target_modules=config["lora"]["target_modules"],
-        ),
-        epochs=config["training"]["epochs"],
-        batch_size=config["training"]["batch_size"],
-        learning_rate=config["training"]["lr"],
-    )
-    
-    # Start training
-    job = client.train(train_config)
-    print(f"Training job started: {job.id}")
-    
-    # Wait for completion
-    job.wait()
-    print(f"Training complete. Final loss: {job.metrics['loss']}")
-    
-    # Download adapter
-    adapter_path = output_dir / "tinker_adapter"
-    job.download_adapter(str(adapter_path))
-    print(f"Adapter saved to: {adapter_path}")
-    
-    return adapter_path
+    metadata = run_training_loop(training_client, config)
+    return write_run_metadata(metadata, output_dir=output_dir)
+
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default="configs/training.yaml")
-    parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default="models/adapters")
+    parser.add_argument("--output", type=Path, default="models/adapters/tinker")
     args = parser.parse_args()
-    train_on_tinker(args.config, args.dataset, args.output)
+    metadata_path = train_on_tinker(args.config, args.output)
+    print(f"Run metadata: {metadata_path}")
 ```
 
 ### 3.3 Local MLX Training Script
@@ -673,7 +648,7 @@ train-local:
 train-cloud:
 	python scripts/train_tinker.py \
 		--config configs/training.yaml \
-		--dataset data/validated/train.jsonl
+		--output models/adapters/tinker
 
 # Validation
 validate:

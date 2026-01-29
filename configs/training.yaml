@@ -29,6 +29,7 @@ cloud:
       - down_proj
   training:
     epochs: 3
+    steps: 300 # If omitted, computed as epochs * 100
     batch_size: 4
     learning_rate: 2.0e-4
 

@@ -128,9 +128,8 @@ gh pr merge --squash
 - Code equivalence needs AST comparison
 
 ### Training with Tinker (production)
-- Upload dataset via `tinker data upload`
 - Use Qwen3-8B or Qwen3-30B-A3B (MoE, cost-efficient)
-- Download adapter after training
+- Run `python scripts/train_tinker.py` (stores run metadata under `models/adapters/tinker/runs`)
 
 ### Training with MLX (local iteration)
 - Use `mlx-community/Qwen3-4B-Instruct-4bit`
@@ -154,17 +153,23 @@ response = generate(model, tokenizer, prompt="...", max_tokens=100)
 
 ### Tinker Training (Cloud)
 ```python
-import tinker
+import os
+from pathlib import Path
+from tinker import ServiceClient
 
-client = tinker.Client()
-job = client.train(
-    model="Qwen/Qwen3-8B",
-    dataset="compression-v1",
-    lora_rank=64,
-    epochs=3,
+from src.training.train_tinker import TinkerTrainingConfig, run_training_loop, write_run_metadata
+
+service_client = ServiceClient(api_key=os.environ["TINKER_API_KEY"])
+training_client = service_client.create_lora_training_client(
+    base_model="Qwen/Qwen3-8B",
 )
-job.wait()
-job.download_adapter("./models/adapter")
+config = TinkerTrainingConfig(
+    base_model="Qwen/Qwen3-8B",
+    epochs=3,
+    steps=300,
+)
+metadata = run_training_loop(training_client, config)
+write_run_metadata(metadata, output_dir=Path("models/adapters/tinker"))
 ```
 
 ### API Client with Retry
@@ -218,7 +223,7 @@ python -m mlx_lm.generate --model mlx-community/Qwen3-4B-Instruct-4bit --prompt 
 python -m mlx_lm.lora --model mlx-community/Qwen3-4B-Instruct-4bit --train --data ./data
 
 # === CLOUD TRAINING (Tinker) ===
-tinker train --model Qwen/Qwen3-8B --dataset compression-v1 --lora-rank 64
+python scripts/train_tinker.py --config configs/training.yaml --output models/adapters/tinker
 
 # === VALIDATION ===
 python scripts/validate_batch.py --input data/seed/pairs.jsonl
