@@ -567,8 +567,21 @@ async def main() -> int:
                 break
 
             batch = pairs_to_validate[i : i + batch_size]
-            await asyncio.gather(*[validate_one(p) for p in batch])
+            # Launch tasks for this batch and allow early stop within the batch
+            tasks = [asyncio.create_task(validate_one(p)) for p in batch]
 
+            for completed in asyncio.as_completed(tasks):
+                # Wait for the next task in this batch to complete
+                await completed
+
+                # If a cost limit stop was requested, cancel remaining tasks in this batch
+                if stop_requested:
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    # Ensure all tasks in this batch have finished or been cancelled
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    break
     # Print summary
     console.print(f"\n[green]Saved results to {args.output}[/green]")
     print_summary(len(all_pairs), passed, failed, skipped, pairs_to_validate, results)
