@@ -183,20 +183,26 @@ class LLMJudge:
                 return self._parse_response(response)
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
+                # Parse errors - retry or try fallback
                 last_error = e
                 logger.warning(f"Judge parse error (attempt {attempt + 1}): {e}")
 
-                # Try fallback if available on last attempt
-                if attempt == max_retries and self.fallback_client:
-                    try:
-                        logger.info("Trying fallback model for LLM judge")
-                        response = await self.fallback_client.complete(
-                            prompt, max_tokens=1024, temperature=0.0
-                        )
-                        return self._parse_response(response)
-                    except Exception as fallback_error:
-                        logger.error(f"Fallback also failed: {fallback_error}")
-                        last_error = fallback_error
+            except Exception as e:
+                # API/network errors - log and retry
+                last_error = e
+                logger.warning(f"Judge API error (attempt {attempt + 1}): {e}")
+
+            # Try fallback if available on last attempt
+            if attempt == max_retries and self.fallback_client:
+                try:
+                    logger.info("Trying fallback model for LLM judge")
+                    response = await self.fallback_client.complete(
+                        prompt, max_tokens=1024, temperature=0.0
+                    )
+                    return self._parse_response(response)
+                except Exception as fallback_error:
+                    logger.error(f"Fallback also failed: {fallback_error}")
+                    last_error = fallback_error
 
         # Return conservative failure result (all retries exhausted)
         return JudgeResult(
@@ -265,14 +271,11 @@ class LLMJudge:
 
         base = base_scores[result.verdict]
 
-        # Modulate by confidence
-        # High confidence amplifies the base score direction
-        # Low confidence pulls toward middle (0.5)
-        if result.confidence >= 0.8:
-            return base
-        else:
-            # Interpolate toward 0.5 as confidence decreases
-            return base * result.confidence + 0.5 * (1 - result.confidence)
+        # Modulate by confidence using continuous interpolation
+        # At confidence=1.0: returns base score
+        # At confidence=0.0: returns 0.5 (maximum uncertainty)
+        # This provides a smooth, continuous function with no discontinuities
+        return base * result.confidence + 0.5 * (1 - result.confidence)
 
     async def batch_evaluate(
         self,

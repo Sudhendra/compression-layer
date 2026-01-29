@@ -61,9 +61,8 @@ class EquivalenceScores:
 # Symbol Normalization
 # =============================================================================
 
-# Mapping of compression symbols/abbreviations to expanded forms
-# This allows fairer lexical comparison between compressed and verbose text
-SYMBOL_EXPANSIONS = {
+# Symbols that can be replaced anywhere (not word-boundary dependent)
+SYMBOL_REPLACEMENTS = {
     # Logical/relational symbols
     "→": " leads to ",
     "←": " from ",
@@ -77,10 +76,13 @@ SYMBOL_EXPANSIONS = {
     "@": " at ",
     "#": " number ",
     "|": " , ",  # Field separator becomes comma
-    "+": " and ",
     "×": " times ",
-    "/": " per ",
-    # Common abbreviations (case-insensitive applied)
+}
+
+# Word abbreviations that need word-boundary matching to avoid false replacements
+# (e.g., "min" in "minimum" or "pm" in "5pm" should not be replaced)
+WORD_ABBREVIATIONS = {
+    # Time abbreviations
     "yr": " year",
     "yrs": " years",
     "mo": " month",
@@ -152,9 +154,15 @@ def normalize_for_comparison(text: str) -> str:
 
     normalized = text.lower()
 
-    # Apply symbol expansions
-    for symbol, expansion in SYMBOL_EXPANSIONS.items():
+    # Apply direct symbol replacements (no word boundaries needed)
+    for symbol, expansion in SYMBOL_REPLACEMENTS.items():
         normalized = normalized.replace(symbol.lower(), expansion)
+
+    # Apply word abbreviations with word-boundary matching
+    for abbrev, expansion in WORD_ABBREVIATIONS.items():
+        # Use word boundaries to avoid replacing "min" in "minimum" etc.
+        pattern = rf"\b{re.escape(abbrev)}\b"
+        normalized = re.sub(pattern, expansion, normalized, flags=re.IGNORECASE)
 
     # Normalize percentages: "+15%" -> "increased 15 percent"
     def expand_percentage(match: re.Match[str]) -> str:
@@ -332,9 +340,20 @@ class EquivalenceCalculator:
         else:
             # Otherwise use configured weights
             total_weight = self.semantic_weight + self.lexical_weight
-            combined = (
-                self.semantic_weight * semantic + self.lexical_weight * lexical
-            ) / total_weight
+            if total_weight <= 0:
+                # Defensive check - fall back to semantic only
+                logger.warning(
+                    "EquivalenceCalculator has non-positive total weight "
+                    "(semantic_weight=%s, lexical_weight=%s); "
+                    "falling back to semantic similarity only.",
+                    self.semantic_weight,
+                    self.lexical_weight,
+                )
+                combined = semantic
+            else:
+                combined = (
+                    self.semantic_weight * semantic + self.lexical_weight * lexical
+                ) / total_weight
 
         return EquivalenceScores(
             semantic_similarity=semantic,
@@ -563,11 +582,25 @@ def extract_atomic_facts(text: str) -> list[str]:
     return facts
 
 
-def compute_fact_overlap(verbose_output: str, compressed_output: str) -> float:
+def compute_fact_overlap(
+    verbose_output: str,
+    compressed_output: str,
+    calculator: "EquivalenceCalculator | None" = None,
+    similarity_threshold: float = 0.8,
+) -> float:
     """
     Compute Jaccard similarity on extracted atomic facts.
 
     This is more meaningful than token-level Jaccard for longer outputs.
+
+    Args:
+        verbose_output: The verbose/original text
+        compressed_output: The compressed text
+        calculator: Optional EquivalenceCalculator instance to reuse (avoids model reload)
+        similarity_threshold: Threshold for considering facts as matching (default 0.8)
+
+    Returns:
+        Fact overlap score between 0.0 and 1.0
     """
     verbose_facts = set(extract_atomic_facts(verbose_output))
     compressed_facts = set(extract_atomic_facts(compressed_output))
@@ -575,21 +608,25 @@ def compute_fact_overlap(verbose_output: str, compressed_output: str) -> float:
     if not verbose_facts or not compressed_facts:
         return 0.0
 
-    # Use semantic matching for facts (fuzzy match)
-    calc = EquivalenceCalculator(semantic_weight=1.0, lexical_weight=0.0)
+    # Use provided calculator or create new one
+    calc = calculator or EquivalenceCalculator(semantic_weight=1.0, lexical_weight=0.0)
 
     # For each verbose fact, find best match in compressed facts
     matches = 0
     for vf in verbose_facts:
-        best_sim = max(calc.compute_semantic_similarity(vf, cf) for cf in compressed_facts)
-        if best_sim > 0.8:  # Threshold for "same fact"
-            matches += 1
+        for cf in compressed_facts:
+            sim = calc.compute_semantic_similarity(vf, cf)
+            if sim > similarity_threshold:
+                matches += 1
+                break  # Early exit: found a match for this verbose fact
 
     # Symmetric: also check compressed -> verbose
     for cf in compressed_facts:
-        best_sim = max(calc.compute_semantic_similarity(cf, vf) for vf in verbose_facts)
-        if best_sim > 0.8:
-            matches += 1
+        for vf in verbose_facts:
+            sim = calc.compute_semantic_similarity(cf, vf)
+            if sim > similarity_threshold:
+                matches += 1
+                break  # Early exit: found a match for this compressed fact
 
     # Average coverage
     total_facts = len(verbose_facts) + len(compressed_facts)

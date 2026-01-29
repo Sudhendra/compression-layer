@@ -63,13 +63,6 @@ MODEL_SHORTCUTS = {
     "gemini": ModelType.GEMINI_FLASH,
 }
 
-# Per-provider concurrency limits (Claude is less stable under load)
-DEFAULT_PROVIDER_CONCURRENCY = {
-    "claude": 2,
-    "gpt": 5,
-    "gemini": 5,
-}
-
 
 def make_pair_hash(pair: CompressionPair) -> str:
     """Create a unique hash for a compression pair."""
@@ -487,6 +480,7 @@ async def main() -> int:
     failed = 0
     cost_tracker = get_cost_tracker()
     initial_cost = cost_tracker.get_total_spend()
+    stop_requested = False
 
     # Validate with progress
     console.print(
@@ -510,9 +504,19 @@ async def main() -> int:
         async def validate_one(
             pair: CompressionPair,
         ) -> tuple[CompressionPair, ValidationResult] | None:
-            nonlocal passed, failed
+            nonlocal passed, failed, stop_requested
+
+            # Check if stop was requested before starting
+            if stop_requested:
+                progress.advance(task)
+                return None
 
             async with sem:
+                # Check again after acquiring semaphore
+                if stop_requested:
+                    progress.advance(task)
+                    return None
+
                 try:
                     result = await harness.validate_pair(pair)
 
@@ -529,13 +533,13 @@ async def main() -> int:
                         save_single_result(pair, result, args.output, args.save_all)
 
                         # Check cost limit
-                        if args.max_cost:
+                        if args.max_cost and not stop_requested:
                             current_cost = cost_tracker.get_total_spend() - initial_cost
                             if current_cost > args.max_cost:
                                 console.print(
                                     f"\n[red]Cost limit reached: ${current_cost:.2f} > ${args.max_cost:.2f}[/red]"
                                 )
-                                return None  # Signal to stop
+                                stop_requested = True
 
                     progress.advance(task)
                     return pair, result
@@ -545,8 +549,17 @@ async def main() -> int:
                     progress.advance(task)
                     return None
 
-        # Process pairs with limited concurrency
-        await asyncio.gather(*[validate_one(p) for p in pairs_to_validate])
+        # Process pairs in batches to allow early stopping
+        batch_size = args.concurrency * 2  # Process 2x concurrency at a time
+        for i in range(0, len(pairs_to_validate), batch_size):
+            if stop_requested:
+                console.print(
+                    f"[yellow]Stopping early due to cost limit. Processed {i} pairs.[/yellow]"
+                )
+                break
+
+            batch = pairs_to_validate[i : i + batch_size]
+            await asyncio.gather(*[validate_one(p) for p in batch])
 
     # Print summary
     console.print(f"\n[green]Saved results to {args.output}[/green]")
