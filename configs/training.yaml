@@ -13,10 +13,10 @@ data:
 # === LOCAL (MLX on M4 Pro) ===
 # For quick iteration and testing
 local:
-  model: "mlx-community/Qwen3-4B-Instruct-4bit"
+  model: "mlx-community/Qwen3-4B-Instruct-2507-8bit"
   # Alternatives:
-  #   - mlx-community/Qwen2.5-7B-Instruct-4bit (~12GB, better quality)
-  #   - mlx-community/Qwen2.5-3B-Instruct-4bit (~6GB, faster)
+  #   - mlx-community/Qwen3-4B-Instruct-2507-4bit (faster, smaller ~5.3GB)
+  #   - mlx-community/Qwen3-8B-4bit (more params but NOT instruct-tuned)
   
   lora:
     rank: 8           # Lower rank for faster local training
@@ -32,7 +32,7 @@ local:
     
   # Memory optimization
   memory:
-    grad_checkpoint: false  # Trade compute for memory
+    grad_checkpoint: true  # Gradient checkpointing (memory saver; not model checkpointing)
     max_seq_length: 2048    # Maximum sequence length
     
   # Logging

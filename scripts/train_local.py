@@ -11,7 +11,7 @@ Usage:
     python scripts/train_local.py --iters 1000
 
     # Train with custom model
-    python scripts/train_local.py --model mlx-community/Qwen2.5-7B-Instruct-4bit
+    python scripts/train_local.py --model mlx-community/Qwen3-4B-Instruct-2507-8bit
 
     # Evaluate existing adapter
     python scripts/train_local.py --evaluate --adapter-path models/adapters/mlx
@@ -107,8 +107,8 @@ Examples:
     parser.add_argument(
         "--model",
         type=str,
-        default="mlx-community/Qwen3-4B-Instruct-4bit",
-        help="Base model to fine-tune (default: mlx-community/Qwen3-4B-Instruct-4bit)",
+        default="mlx-community/Qwen3-4B-Instruct-2507-8bit",
+        help="Base model to fine-tune (default: mlx-community/Qwen3-4B-Instruct-2507-8bit)",
     )
 
     # Training parameters
