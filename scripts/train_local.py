@@ -232,6 +232,7 @@ def main() -> int:
 
 def run_train(config: MLXTrainingConfig) -> int:
     """Run training."""
+    settings = get_settings()
     console.print(
         Panel.fit(
             "[bold]MLX Local Training[/bold]\n\n"
@@ -271,11 +272,19 @@ def run_train(config: MLXTrainingConfig) -> int:
         return 1
 
     # Success
+    run_dir = result.adapter_path.parent if result.adapter_path else None
+    latest_symlink = settings.models_dir / "runs" / "mlx" / "latest"
+    log_hint = ""
+    if run_dir is not None:
+        log_hint = f"\nRun logs: {run_dir / 'train.log'}"
+
     console.print(
         Panel.fit(
             f"[green]✓ Training completed![/green]\n\n"
             f"Adapter saved to: {result.adapter_path}\n"
-            f"Iterations: {result.total_iters}",
+            f"Iterations: {result.total_iters}\n"
+            f"Latest run: {latest_symlink}"
+            f"{log_hint}",
             border_style="green",
         )
     )

@@ -91,6 +91,9 @@ Prioritized implementation tasks.
 - [ ] `src/training/train_tinker.py` — Tinker cloud training
 - [ ] Dataset formatting for both platforms
 
+### P1 — MLX Run Storage
+- [ ] MLX run storage + checkpoint logging
+
 ### P1 — Dataset Builder
 - [ ] `src/training/dataset.py` — Format for instruction tuning
 - [ ] JSONL export compatible with MLX and Tinker

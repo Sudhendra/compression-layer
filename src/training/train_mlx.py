@@ -15,13 +15,18 @@ Usage:
     result = train_local(config)
 """
 
+import json
 import logging
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
+
+from src.training.run_storage import create_run_dir
+from src.utils.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +100,16 @@ class TrainingResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class RunPaths:
+    """Paths for a specific MLX training run."""
+
+    run_dir: Path
+    meta_path: Path
+    log_path: Path
+    err_path: Path
+
+
 def check_mlx_available() -> bool:
     """Check if mlx_lm is available."""
     try:
@@ -106,6 +121,61 @@ def check_mlx_available() -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def get_git_sha() -> str:
+    """Get the current git SHA."""
+    try:
+        settings = get_settings()
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=settings.project_root,
+        )
+    except Exception:
+        return "unknown"
+
+    if result.returncode != 0:
+        return "unknown"
+
+    return result.stdout.strip() or "unknown"
+
+
+def prepare_run_paths(config: MLXTrainingConfig, runs_root: Path) -> RunPaths:
+    """Create run directory and write metadata for MLX training."""
+    run_dir = create_run_dir(runs_root)
+    meta_path = run_dir / "run.json"
+    log_path = run_dir / "train.log"
+    err_path = run_dir / "train.err"
+    metadata = {
+        "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "git_sha": get_git_sha(),
+        "data_dir": str(config.data_dir),
+        "model": config.model,
+        "lora_rank": config.lora_rank,
+        "lora_alpha": config.lora_alpha,
+        "iters": config.iters,
+        "batch_size": config.batch_size,
+        "learning_rate": config.learning_rate,
+    }
+    meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return RunPaths(
+        run_dir=run_dir,
+        meta_path=meta_path,
+        log_path=log_path,
+        err_path=err_path,
+    )
+
+
+def update_latest_symlink(runs_root: Path, run_dir: Path) -> None:
+    """Update the latest symlink to point at the current run."""
+    latest_path = runs_root / "latest"
+    if latest_path.exists() or latest_path.is_symlink():
+        if latest_path.is_dir() and not latest_path.is_symlink():
+            raise ValueError(f"Cannot replace latest path; directory exists at {latest_path}")
+        latest_path.unlink()
+    latest_path.symlink_to(run_dir, target_is_directory=True)
 
 
 def write_lora_config(config: MLXTrainingConfig, config_path: Path) -> None:
@@ -162,6 +232,11 @@ def train_local(config: MLXTrainingConfig) -> TrainingResult:
             error=f"Training file not found: {train_file}",
         )
 
+    settings = get_settings()
+    runs_root = settings.models_dir / "runs" / "mlx"
+    run_paths = prepare_run_paths(config, runs_root)
+    config.adapter_path = run_paths.run_dir / "adapter"
+
     # Write MLX LoRA config
     config_path = config.adapter_path / "lora_config.yaml"
     write_lora_config(config, config_path)
@@ -213,19 +288,27 @@ def train_local(config: MLXTrainingConfig) -> TrainingResult:
     config.adapter_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Run training
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        run_paths.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with (
+            open(run_paths.log_path, "w", encoding="utf-8") as log_file,
+            open(run_paths.err_path, "w", encoding="utf-8") as err_file,
+        ):
+            result = subprocess.run(
+                cmd,
+                stdout=log_file,
+                stderr=err_file,
+                text=True,
+            )
 
         if result.returncode != 0:
-            logger.error(f"Training failed: {result.stderr}")
+            logger.error(
+                "Training failed. See %s for stderr logs.",
+                run_paths.err_path,
+            )
             return TrainingResult(
                 success=False,
                 adapter_path=None,
-                error=result.stderr,
+                error=f"Training failed. See logs in {run_paths.run_dir}",
             )
 
         # Check for adapter files
@@ -237,7 +320,11 @@ def train_local(config: MLXTrainingConfig) -> TrainingResult:
                 error="Training completed but no adapter files found",
             )
 
-        logger.info(f"Training completed. Adapter saved to {config.adapter_path}")
+        logger.info(
+            "Training completed. Adapter saved to %s",
+            config.adapter_path,
+        )
+        update_latest_symlink(runs_root, run_paths.run_dir)
 
         return TrainingResult(
             success=True,

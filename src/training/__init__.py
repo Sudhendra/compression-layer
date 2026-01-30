@@ -38,6 +38,7 @@ from .train_tinker import (
     estimate_cost,
     train_on_tinker,
 )
+from .run_storage import create_run_dir
 
 __all__ = [
     # Format data
@@ -69,4 +70,5 @@ __all__ = [
     "estimate_cost",
     "train_on_tinker",
     "TinkerSDKClient",
+    "create_run_dir",
 ]
