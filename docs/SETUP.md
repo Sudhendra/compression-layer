@@ -85,6 +85,19 @@ python -m mlx_lm.generate \
 | Qwen3-4B | ~8GB | ~150 tok/s |
 | Qwen2.5-7B | ~12GB | ~100 tok/s |
 
+### 1.5 Run Outputs
+
+Local MLX runs are stored per run under:
+
+```
+models/runs/mlx/<timestamp>
+```
+
+Each run directory captures run metadata (`run.json`), training logs (`train.log`,
+`train.err`), and adapter outputs under `adapter/`.
+The newest run is always accessible via the `models/runs/mlx/latest` symlink when
+using `scripts/train_local.py`.
+
 ---
 
 ## Part 2: Cloud Training (Tinker)

@@ -391,6 +391,8 @@ class SeedGenerator:
 | **Tinker** | Qwen3-30B-A3B | Fast | ~$4-18 | MoE, cost-efficient |
 | **Local MLX** | Qwen3-4B | Slow | Free | Quick experiments |
 
+Note: MLX runs are stored per run under `models/runs/mlx/<timestamp>` for repeatability.
+
 ### 3.2 Tinker Training Script
 
 ```python
