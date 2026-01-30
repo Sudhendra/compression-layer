@@ -1,24 +1,58 @@
 # Training Pipeline Configuration
+# For compression model fine-tuning
+
+# === DATA FORMAT ===
+# Training data uses chat format with system/user/assistant messages
+# See: data/training/train.jsonl, valid.jsonl, test.jsonl
+data:
+  dir: "data/training"
+  format: "chat"  # MLX-LM chat format with messages array
+  # System prompt used during data formatting
+  system_prompt: "You are a semantic compression engine. Compress the input into minimal tokens while preserving all information for equivalent LLM reasoning. Use dense notation: labeled fields, standard abbreviations, and symbols (→ | + @). Never lose information."
 
 # === LOCAL (MLX on M4 Pro) ===
+# For quick iteration and testing
 local:
   model: "mlx-community/Qwen3-4B-Instruct-4bit"
-  # Alt: mlx-community/Qwen2.5-7B-Instruct-4bit (~12GB)
+  # Alternatives:
+  #   - mlx-community/Qwen2.5-7B-Instruct-4bit (~12GB, better quality)
+  #   - mlx-community/Qwen2.5-3B-Instruct-4bit (~6GB, faster)
+  
   lora:
-    rank: 8 # Lower for local
-    alpha: 16
+    rank: 8           # Lower rank for faster local training
+    alpha: 16         # Usually 2x rank
+    layers: 16        # Number of layers to fine-tune
+  
   training:
-    iters: 500
-    batch_size: 2
+    iters: 500        # Training iterations
+    batch_size: 2     # Batch size (reduce if OOM)
     learning_rate: 1.0e-4
+    grad_accumulation: 4  # Effective batch = batch_size * grad_accumulation
+    mask_prompt: true     # Only compute loss on assistant response
+    
+  # Memory optimization
+  memory:
+    grad_checkpoint: false  # Trade compute for memory
+    max_seq_length: 2048    # Maximum sequence length
+    
+  # Logging
+  logging:
+    steps_per_report: 10
+    steps_per_eval: 100
+    save_every: 100
 
 # === CLOUD (Tinker) ===
+# For production training runs
 cloud:
   model: "Qwen/Qwen3-8B"
-  # Alt: Qwen/Qwen3-30B-A3B (MoE, similar cost, more capable)
+  # Alternatives:
+  #   - Qwen/Qwen3-4B-Instruct-2507 (faster, cheaper)
+  #   - Qwen/Qwen3-30B-A3B (MoE, good quality/cost ratio)
+  
   lora:
-    rank: 64
-    alpha: 128
+    rank: 64          # Higher rank for better quality
+    alpha: 128        # Usually 2x rank
+    dropout: 0.0
     target_modules:
       - q_proj
       - k_proj
@@ -27,19 +61,31 @@ cloud:
       - gate_proj
       - up_proj
       - down_proj
+  
   training:
     epochs: 3
     batch_size: 4
     learning_rate: 2.0e-4
+    warmup_ratio: 0.03
+    max_seq_length: 2048
+
+# === OUTPUT PATHS ===
+output:
+  local_adapter: "models/adapters/mlx"
+  cloud_adapter: "models/adapters/tinker"
+  fused_model: "models/fused"
 
 # === COST ESTIMATES (Tinker) ===
-# Qwen3-8B: $0.40/1M tokens
-# 10K pairs (~5M tokens) × 3 epochs = ~$6
-# 50K pairs (~25M tokens) × 3 epochs = ~$30
-# 5 training runs total: ~$30-150
-
-# === DATA ===
-data:
-  train_path: "data/validated/train.jsonl"
-  eval_path: "data/validated/test.jsonl"
-  format: "text" # or "chat" for messages format
+# Based on ~2,200 training examples with 80/10/10 split
+# Average ~500 tokens per example (system + user + assistant)
+#
+# Model pricing (per 1M tokens):
+#   - Qwen3-8B: $0.40
+#   - Qwen3-4B: $0.20
+#   - Qwen3-30B-A3B: $0.45
+#
+# Estimates for 1,759 training examples × 3 epochs:
+#   - Qwen3-8B: ~$1.05
+#   - With validation: ~$1.50-2.00 total
+#
+# Budget for 5 training runs: ~$10-15
