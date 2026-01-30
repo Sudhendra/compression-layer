@@ -20,6 +20,7 @@ from .format_data import (
     write_completions_jsonl,
     write_text_jsonl,
 )
+from .run_storage import create_run_dir
 from .tinker_sdk import TinkerSDKClient
 from .train_mlx import (
     MLXTrainingConfig,
@@ -38,7 +39,6 @@ from .train_tinker import (
     estimate_cost,
     train_on_tinker,
 )
-from .run_storage import create_run_dir
 
 __all__ = [
     # Format data

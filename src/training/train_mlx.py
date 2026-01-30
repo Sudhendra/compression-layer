@@ -19,7 +19,7 @@ import json
 import logging
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -149,7 +149,7 @@ def prepare_run_paths(config: MLXTrainingConfig, runs_root: Path) -> RunPaths:
     log_path = run_dir / "train.log"
     err_path = run_dir / "train.err"
     metadata = {
-        "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "started_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "git_sha": get_git_sha(),
         "data_dir": str(config.data_dir),
         "model": config.model,
