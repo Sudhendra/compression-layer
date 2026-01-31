@@ -374,6 +374,7 @@ def evaluate_adapter(
         "--data",
         str(data_dir),
         "--test",
+        "--mask-prompt",
     ]
 
     try:
