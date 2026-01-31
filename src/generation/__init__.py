@@ -1,5 +1,6 @@
 """Generation module for compression pair synthesis."""
 
+from .adapter_generator import AdapterGenerator
 from .seed_generator import (
     GeneratedPair,
     GenerationResult,
@@ -8,6 +9,7 @@ from .seed_generator import (
 )
 
 __all__ = [
+    "AdapterGenerator",
     "GeneratedPair",
     "GenerationResult",
     "SeedGenerator",
