@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from typing import Any
 from pathlib import Path
 
 
@@ -16,9 +17,9 @@ class AdapterGenerator:
         adapter_path: Path | None = None,
         system_prompt: str | None = None,
         temp: float = 0.2,
-        load_fn: Callable | None = None,
-        generate_fn: Callable | None = None,
-        sampler_factory: Callable | None = None,
+        load_fn: Callable[..., Any] | None = None,
+        generate_fn: Callable[..., Any] | None = None,
+        sampler_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.model_name = model
         self.adapter_path = adapter_path
@@ -39,6 +40,8 @@ class AdapterGenerator:
         self._generate = generate_fn
         self._sampler = sampler_factory(temp)
         loaded = load_fn(model, adapter_path=str(adapter_path) if adapter_path else None)
+        self.mlx_model: Any
+        self.tokenizer: Any
         self.mlx_model, self.tokenizer = loaded[:2]
 
     def compress(self, text: str, max_tokens: int = 512) -> str:
