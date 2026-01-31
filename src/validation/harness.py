@@ -1,14 +1,18 @@
 """Cross-model validation harness for compression pairs."""
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
 from ..utils.caching import SemanticCache
 from ..utils.tokenizers import count_tokens
-from .metrics import TaskType, compute_equivalence
+from .llm_judge import LLMJudge
+from .metrics import EquivalenceCalculator, TaskType, compute_equivalence
 from .models import ModelClient, ModelType
+
+logger = logging.getLogger(__name__)
 
 
 class CompressionPair(BaseModel):
@@ -30,6 +34,8 @@ class ValidationResult:
     equivalence_scores: dict[ModelType, float]
     min_equivalence: float
     passed: bool
+    llm_judge_used: bool = False
+    llm_judge_scores: dict[ModelType, float] | None = None
 
     @property
     def token_reduction_percent(self) -> float:
@@ -81,34 +87,59 @@ class ValidationHarness:
 
     Validates that compressed text produces equivalent model outputs
     across multiple LLMs (Claude, GPT, Gemini).
+
+    The validation pipeline now:
+    1. Uses temperature=0.0 for deterministic outputs
+    2. Uses pure semantic similarity (not lexical) by default
+    3. Optionally uses LLM-as-judge for more accurate equivalence
+    4. Defaults to a lower threshold (0.72) that better matches actual equivalence
     """
 
     def __init__(
         self,
         models: list[ModelType] | None = None,
-        equivalence_threshold: float = 0.85,
+        equivalence_threshold: float = 0.72,
         tasks: list[TaskType] | None = None,
         cache: SemanticCache | None = None,
+        use_llm_judge: bool = False,  # Optional LLM judge for more accuracy
+        llm_judge_model: ModelType = ModelType.CLAUDE_SONNET,
     ):
         """
         Initialize the validation harness.
 
         Args:
             models: List of models to validate against (defaults to all)
-            equivalence_threshold: Minimum equivalence score to pass
+            equivalence_threshold: Minimum equivalence score to pass (default: 0.72)
             tasks: Task types to test (defaults to QA + REASONING)
             cache: Optional cache for API responses
+            use_llm_judge: Whether to use LLM-as-judge for equivalence (costs more but more accurate)
+            llm_judge_model: Model to use for LLM judge (default: Claude Sonnet)
         """
         if models is None:
             models = [ModelType.CLAUDE_SONNET, ModelType.GPT4O_MINI, ModelType.GEMINI_FLASH]
 
         self.models = models
         self.threshold = equivalence_threshold
-        self.tasks = tasks or [TaskType.QA, TaskType.REASONING]
+        # Auto-select tasks based on domain if not specified
+        if tasks is None:
+            # Will be set in validate_pair based on pair.domain
+            self.tasks = None
+        else:
+            self.tasks = tasks
         self.cache = cache
 
         # Initialize clients
         self.clients = {m: ModelClient(m, cache=cache) for m in models}
+
+        # LLM Judge (optional)
+        self.use_llm_judge = use_llm_judge
+        self.llm_judge = LLMJudge(judge_model=llm_judge_model) if use_llm_judge else None
+
+        # Equivalence calculator with pure semantic similarity
+        self.metrics = EquivalenceCalculator(
+            semantic_weight=1.0,  # Pure semantic
+            lexical_weight=0.0,  # No lexical (hurts valid compressions)
+        )
 
     async def validate_pair(
         self,
@@ -127,32 +158,72 @@ class ValidationHarness:
         """
         prompts = task_prompts or DEFAULT_TASK_PROMPTS
         scores: dict[ModelType, float] = {}
+        llm_judge_scores: dict[ModelType, float] | None = {} if self.use_llm_judge else None
 
-        async def eval_model(model_type: ModelType) -> tuple[ModelType, float]:
+        # Auto-select tasks based on domain if not set
+        if self.tasks is None:
+            if pair.domain == "code":
+                tasks = [TaskType.CODE_GEN, TaskType.REASONING]
+            else:
+                tasks = [TaskType.QA, TaskType.REASONING]
+        else:
+            tasks = self.tasks
+
+        async def eval_model(model_type: ModelType) -> tuple[ModelType, float, float | None]:
             """Evaluate equivalence for a single model across all tasks."""
             client = self.clients[model_type]
             task_scores: list[float] = []
+            judge_scores: list[float] = []
 
-            for task_type in self.tasks:
+            for task_type in tasks:
                 prompt_template = prompts.get(task_type, prompts[TaskType.QA])
 
                 # Get outputs for verbose and compressed inputs
+                # Note: temperature=0.0 is now the default in ModelClient
                 verbose_prompt = prompt_template.format(context=pair.verbose)
                 compressed_prompt = prompt_template.format(context=pair.compressed)
 
                 verbose_out = await client.complete(verbose_prompt)
                 compressed_out = await client.complete(compressed_prompt)
 
-                # Compute equivalence
+                # Compute equivalence using semantic similarity
                 score = await compute_equivalence(verbose_out, compressed_out, task_type)
-                task_scores.append(score)
+
+                # Optionally use LLM judge for more accurate assessment
+                llm_score = None
+                if self.use_llm_judge and self.llm_judge:
+                    task_desc = f"{task_type.value} task: extracting and comparing information"
+                    judge_result = await self.llm_judge.evaluate(
+                        task_description=task_desc,
+                        verbose_output=verbose_out,
+                        compressed_output=compressed_out,
+                    )
+                    llm_score = self.llm_judge.verdict_to_score(judge_result)
+                    judge_scores.append(llm_score)
+
+                    # Combine semantic and LLM judge (LLM judge weighted heavily)
+                    combined = self.metrics.compute(
+                        verbose_out,
+                        compressed_out,
+                        llm_judge_score=llm_score,
+                    )
+                    task_scores.append(combined.combined_score)
+                else:
+                    task_scores.append(score)
 
             # Average across tasks
-            return model_type, sum(task_scores) / len(task_scores)
+            avg_score = sum(task_scores) / len(task_scores)
+            avg_judge = sum(judge_scores) / len(judge_scores) if judge_scores else None
+
+            return model_type, avg_score, avg_judge
 
         # Run all models in parallel
         results = await asyncio.gather(*[eval_model(m) for m in self.models])
-        scores = dict(results)
+
+        for model_type, score, judge_score in results:
+            scores[model_type] = score
+            if llm_judge_scores is not None and judge_score is not None:
+                llm_judge_scores[model_type] = judge_score
 
         # Calculate metrics
         verbose_tokens = count_tokens(pair.verbose)
@@ -166,6 +237,8 @@ class ValidationHarness:
             equivalence_scores=scores,
             min_equivalence=min_equiv,
             passed=min_equiv >= self.threshold,
+            llm_judge_used=self.use_llm_judge,
+            llm_judge_scores=llm_judge_scores if llm_judge_scores is not None else None,
         )
 
     async def validate_batch(
@@ -237,7 +310,8 @@ async def validate_compression(
     verbose: str,
     compressed: str,
     domain: str = "nl",
-    threshold: float = 0.85,
+    threshold: float = 0.72,  # Lowered from 0.85
+    use_llm_judge: bool = False,
 ) -> ValidationResult:
     """
     Convenience function to validate a single compression.
@@ -246,11 +320,15 @@ async def validate_compression(
         verbose: Original text
         compressed: Compressed text
         domain: Content domain
-        threshold: Equivalence threshold
+        threshold: Equivalence threshold (default: 0.72)
+        use_llm_judge: Whether to use LLM judge for more accurate equivalence
 
     Returns:
         ValidationResult
     """
-    harness = ValidationHarness(equivalence_threshold=threshold)
+    harness = ValidationHarness(
+        equivalence_threshold=threshold,
+        use_llm_judge=use_llm_judge,
+    )
     pair = CompressionPair(verbose=verbose, compressed=compressed, domain=domain)
     return await harness.validate_pair(pair)

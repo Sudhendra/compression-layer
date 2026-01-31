@@ -194,19 +194,23 @@ async def main() -> int:
         console.print("[red]ANTHROPIC_API_KEY not set in environment![/red]")
         return 1
 
-    # Generate pairs
+    # Generate pairs with incremental saving
     config = GenerationConfig(concurrency=args.concurrency)
     generator = SeedGenerator(config)
+
+    # Clear output file if not appending
+    if not args.append and args.output.exists():
+        args.output.unlink()
 
     result = await generator.generate_batch(
         inputs=inputs,
         domain=args.domain,
         language=args.language,
         concurrency=args.concurrency,
+        output_path=args.output,  # Saves incrementally
     )
 
-    # Save results
-    generator.save_pairs(result.pairs, args.output, append=args.append)
+    console.print(f"[green]Saved {len(result.pairs)} pairs to {args.output}[/green]")
 
     # Print summary
     print_summary(result.pairs, result.cached_count, result.generated_count)

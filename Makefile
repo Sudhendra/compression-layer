@@ -43,11 +43,9 @@ train-local:
 		--iters 500
 
 train-cloud:
-	tinker train \
-		--model Qwen/Qwen3-8B \
-		--dataset compression-v1 \
-		--lora-rank 64 \
-		--epochs 3
+	python scripts/train_tinker.py \
+		--config configs/training.yaml \
+		--output models/adapters/tinker
 
 eval:
 	python scripts/evaluate.py \

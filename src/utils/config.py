@@ -1,10 +1,15 @@
 """Pydantic settings for the compression layer project."""
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from src.training import TinkerTrainingConfig
 
 
 class Settings(BaseSettings):
@@ -111,6 +116,30 @@ class TrainingConfig(BaseSettings):
     cloud_epochs: int = 3
     cloud_batch_size: int = 4
     cloud_lr: float = 2e-4
+
+
+def load_tinker_training_config(config_path: Path) -> TinkerTrainingConfig:
+    """Load Tinker training settings from the YAML config."""
+    import yaml
+
+    from src.training import TinkerTrainingConfig
+
+    defaults = TrainingConfig()
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    cloud = payload.get("cloud", {})
+    training = cloud.get("training", {})
+
+    model = cloud.get("model", defaults.cloud_model)
+    epochs = int(training.get("epochs", defaults.cloud_epochs))
+    batch_size = int(training.get("batch_size", defaults.cloud_batch_size))
+    learning_rate = float(training.get("learning_rate", defaults.cloud_lr))
+
+    return TinkerTrainingConfig(
+        model=model,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+    )
 
 
 # Singleton instance

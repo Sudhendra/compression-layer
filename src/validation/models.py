@@ -1,14 +1,33 @@
 """Model type definitions and async API clients for validation."""
 
 import asyncio
+import random
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel
+from rich.console import Console
 
 from ..utils.caching import SemanticCache, make_cache_key
 from ..utils.config import get_settings
 from ..utils.costs import get_cost_tracker
+
+console = Console()
+
+# Retryable error patterns (rate limits + server errors)
+RETRYABLE_PATTERNS = [
+    "rate",
+    "429",
+    "500",
+    "502",
+    "503",
+    "520",
+    "overloaded",
+    "internal server error",
+    "server error",
+    "temporarily unavailable",
+    "capacity",
+]
 
 
 class ModelType(Enum):
@@ -39,11 +58,13 @@ class ModelClient:
         self,
         model_type: ModelType,
         cache: SemanticCache | None = None,
-        max_retries: int = 3,
+        max_retries: int = 5,
+        operation: str = "validation",
     ):
         self.model_type = model_type
         self.cache = cache
         self.max_retries = max_retries
+        self.operation = operation
         self._client: Any = None
         self._init_client()
 
@@ -71,7 +92,7 @@ class ModelClient:
         self,
         prompt: str,
         max_tokens: int = 1024,
-        temperature: float = 0.4,
+        temperature: float = 0.0,  # Deterministic for validation
         use_cache: bool = True,
     ) -> str:
         """
@@ -111,7 +132,7 @@ class ModelClient:
             model=response.model,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
-            operation="validation",
+            operation=self.operation,
         )
 
         return response.text
@@ -122,22 +143,50 @@ class ModelClient:
         max_tokens: int,
         temperature: float,
     ) -> APIResponse:
-        """Call API with exponential backoff retry."""
+        """
+        Call API with exponential backoff retry for transient errors.
+
+        Handles:
+        - Rate limits (429)
+        - Server errors (500, 502, 503, 520)
+        - Overloaded/capacity errors
+
+        Uses exponential backoff with jitter to avoid thundering herd.
+        """
         last_error: Exception | None = None
+        base_wait = 2.0  # Base wait time in seconds
 
         for attempt in range(self.max_retries):
             try:
                 return await self._call_api(prompt, max_tokens, temperature)
             except Exception as e:
                 last_error = e
-                # Check for rate limit errors
                 error_str = str(e).lower()
-                if "rate" in error_str or "429" in error_str:
-                    wait_time = 2**attempt
+
+                # Check if error is retryable
+                is_retryable = any(pattern in error_str for pattern in RETRYABLE_PATTERNS)
+
+                if is_retryable:
+                    # Exponential backoff with jitter
+                    wait_time = base_wait * (2**attempt) + random.uniform(0, 1)
+                    max_wait = 60.0  # Cap at 60 seconds
+
+                    wait_time = min(wait_time, max_wait)
+
+                    console.print(
+                        f"[yellow]Retryable error on {self.model_type.value} "
+                        f"(attempt {attempt + 1}/{self.max_retries}): "
+                        f"{type(e).__name__}. Waiting {wait_time:.1f}s...[/yellow]"
+                    )
                     await asyncio.sleep(wait_time)
                 else:
+                    # Non-retryable error, raise immediately
                     raise
 
+        # All retries exhausted
+        console.print(
+            f"[red]Max retries ({self.max_retries}) exceeded for {self.model_type.value}[/red]"
+        )
         raise last_error or Exception("Max retries exceeded")
 
     async def _call_api(

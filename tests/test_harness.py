@@ -106,19 +106,27 @@ class TestValidationHarness:
     @pytest.mark.asyncio
     async def test_harness_initialization(self):
         """Test harness initializes with default models."""
-        with patch("src.validation.harness.ModelClient") as mock_client_class:
+        with (
+            patch("src.validation.harness.ModelClient") as mock_client_class,
+            patch("src.validation.harness.EquivalenceCalculator") as mock_calc_class,
+        ):
             mock_client_class.return_value = MagicMock()
+            mock_calc_class.return_value = MagicMock()
             harness = ValidationHarness()
 
             assert len(harness.models) == 3
             assert ModelType.CLAUDE_SONNET in harness.models
-            assert harness.threshold == 0.85
+            assert harness.threshold == 0.72  # Updated default threshold
 
     @pytest.mark.asyncio
     async def test_harness_custom_models(self):
         """Test harness with custom model list."""
-        with patch("src.validation.harness.ModelClient") as mock_client_class:
+        with (
+            patch("src.validation.harness.ModelClient") as mock_client_class,
+            patch("src.validation.harness.EquivalenceCalculator") as mock_calc_class,
+        ):
             mock_client_class.return_value = MagicMock()
+            mock_calc_class.return_value = MagicMock()
             harness = ValidationHarness(
                 models=[ModelType.GPT4O_MINI],
                 equivalence_threshold=0.90,
@@ -130,11 +138,19 @@ class TestValidationHarness:
     @pytest.mark.asyncio
     async def test_validate_pair_mocked(self, sample_pair):
         """Test validation with mocked API calls."""
-        with patch("src.validation.harness.ModelClient") as mock_client_class:
+        with (
+            patch("src.validation.harness.ModelClient") as mock_client_class,
+            patch("src.validation.harness.EquivalenceCalculator") as mock_calc_class,
+        ):
             # Setup mock client
             mock_client = MagicMock()
             mock_client.complete = AsyncMock(return_value="Test response about John Smith")
             mock_client_class.return_value = mock_client
+
+            # Setup mock calculator to return high similarity
+            mock_calc = MagicMock()
+            mock_calc.compute_semantic_similarity = MagicMock(return_value=0.95)
+            mock_calc_class.return_value = mock_calc
 
             harness = ValidationHarness(
                 models=[ModelType.CLAUDE_SONNET],
@@ -152,10 +168,18 @@ class TestValidationHarness:
     @pytest.mark.asyncio
     async def test_quick_validate_mocked(self):
         """Test quick_validate convenience method."""
-        with patch("src.validation.harness.ModelClient") as mock_client_class:
+        with (
+            patch("src.validation.harness.ModelClient") as mock_client_class,
+            patch("src.validation.harness.EquivalenceCalculator") as mock_calc_class,
+        ):
             mock_client = MagicMock()
             mock_client.complete = AsyncMock(return_value="Identical response")
             mock_client_class.return_value = mock_client
+
+            # Setup mock calculator to return high similarity
+            mock_calc = MagicMock()
+            mock_calc.compute_semantic_similarity = MagicMock(return_value=0.95)
+            mock_calc_class.return_value = mock_calc
 
             harness = ValidationHarness(
                 models=[ModelType.GPT4O_MINI],
@@ -174,10 +198,18 @@ class TestValidationHarness:
     @pytest.mark.asyncio
     async def test_validate_batch_mocked(self, sample_pair):
         """Test batch validation."""
-        with patch("src.validation.harness.ModelClient") as mock_client_class:
+        with (
+            patch("src.validation.harness.ModelClient") as mock_client_class,
+            patch("src.validation.harness.EquivalenceCalculator") as mock_calc_class,
+        ):
             mock_client = MagicMock()
             mock_client.complete = AsyncMock(return_value="Batch response")
             mock_client_class.return_value = mock_client
+
+            # Setup mock calculator to return high similarity
+            mock_calc = MagicMock()
+            mock_calc.compute_semantic_similarity = MagicMock(return_value=0.95)
+            mock_calc_class.return_value = mock_calc
 
             harness = ValidationHarness(
                 models=[ModelType.CLAUDE_SONNET],

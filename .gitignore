@@ -83,6 +83,9 @@ adapters/
 .DS_Store
 Thumbs.db
 
+# Worktrees
+.worktrees/
+
 # Logs
 *.log
 logs/
@@ -91,3 +94,38 @@ logs/
 tmp/
 temp/
 *.tmp
+
+# AI Assistant skill directories
+.agent/
+.agents/
+.claude/
+.cline/
+.codebuddy/
+.codex/
+.commandcode/
+.continue/
+.crush/
+.cursor/
+.factory/
+.gemini/
+.github/skills/
+.goose/
+.junie/
+.kilocode/
+.kiro/
+.kode/
+.mcpjam/
+.mux/
+.neovate/
+.openclaude/
+.opencode/
+.openhands/
+.pi/
+.pochi/
+.qoder/
+.qwen/
+.roo/
+.trae/
+.windsurf/
+.zencoder/
+skills/

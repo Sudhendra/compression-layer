@@ -78,6 +78,7 @@ class SeedGenerator:
             primary_model,
             cache=None,  # We handle caching at the generator level
             max_retries=self.config.max_retries,
+            operation="generation",
         )
         self.cost_tracker = get_cost_tracker()
 
@@ -185,6 +186,7 @@ class SeedGenerator:
         language: str = "python",
         concurrency: int | None = None,
         show_progress: bool = True,
+        output_path: Path | None = None,
     ) -> GenerationResult:
         """
         Generate compression pairs for a batch of inputs.
@@ -195,6 +197,7 @@ class SeedGenerator:
             language: Programming language (for code domain)
             concurrency: Max concurrent requests (defaults to config)
             show_progress: Whether to show progress bar
+            output_path: If provided, save pairs incrementally to this file
 
         Returns:
             GenerationResult with all pairs and statistics
@@ -207,8 +210,19 @@ class SeedGenerator:
         generated_count = 0
         total_input_tokens = 0
         total_output_tokens = 0
+        lock = asyncio.Lock()
 
-        async def process_one(text: str) -> GeneratedPair:
+        # Prepare output file for incremental writes
+        if output_path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def save_pair_to_file(pair: GeneratedPair) -> None:
+            """Save a single pair to the output file (append mode)."""
+            if output_path:
+                with open(output_path, "a") as f:
+                    f.write(json.dumps(pair.model_dump()) + "\n")
+
+        async def process_one(text: str, idx: int) -> GeneratedPair:
             nonlocal cached_count, generated_count
             async with sem:
                 # Check cache first to count cached items
@@ -219,34 +233,54 @@ class SeedGenerator:
                         "code", text, model=self.config.primary_model, lang=language
                     )
 
-                if self.cache.get(cache_key):
-                    cached_count += 1
-                else:
-                    generated_count += 1
+                is_cached = self.cache.get(cache_key) is not None
 
                 # Generate pair
                 if domain == "nl":
-                    return await self.generate_nl_pair(text)
+                    pair = await self.generate_nl_pair(text)
                 else:
-                    return await self.generate_code_pair(text, language)
+                    pair = await self.generate_code_pair(text, language)
+
+                # Thread-safe counter update and file write
+                async with lock:
+                    if is_cached:
+                        cached_count += 1
+                    else:
+                        generated_count += 1
+
+                    # Write to file incrementally
+                    save_pair_to_file(pair)
+
+                return pair
 
         if show_progress:
+            from rich.progress import BarColumn, TaskProgressColumn, TimeRemainingColumn
+
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeRemainingColumn(),
                 console=console,
             ) as progress:
                 task = progress.add_task(
                     f"Generating {len(inputs)} {domain} pairs...",
                     total=len(inputs),
                 )
-                for text in inputs:
-                    pair = await process_one(text)
-                    pairs.append(pair)
+
+                # Process in parallel with progress tracking
+                async def process_with_progress(text: str, idx: int) -> GeneratedPair:
+                    pair = await process_one(text, idx)
                     progress.advance(task)
+                    return pair
+
+                pairs = await asyncio.gather(
+                    *[process_with_progress(text, i) for i, text in enumerate(inputs)]
+                )
         else:
             # Process in parallel without progress bar
-            pairs = await asyncio.gather(*[process_one(text) for text in inputs])
+            pairs = await asyncio.gather(*[process_one(text, i) for i, text in enumerate(inputs)])
 
         return GenerationResult(
             pairs=list(pairs),

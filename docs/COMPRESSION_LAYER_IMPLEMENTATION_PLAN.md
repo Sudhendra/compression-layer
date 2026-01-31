@@ -93,7 +93,7 @@ dependencies = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
     "google-genai>=1.0.0",
-    "tinker-sdk>=0.1.0",
+    "tinker",
     
     # Local inference (MLX)
     "mlx>=0.20.0",
@@ -391,63 +391,40 @@ class SeedGenerator:
 | **Tinker** | Qwen3-30B-A3B | Fast | ~$4-18 | MoE, cost-efficient |
 | **Local MLX** | Qwen3-4B | Slow | Free | Quick experiments |
 
+Note: MLX runs are stored per run under `models/runs/mlx/<timestamp>` for repeatability.
+
 ### 3.2 Tinker Training Script
 
 ```python
 # src/training/train_tinker.py
-from tinker import Client, TrainingConfig, LoraConfig
+import os
 from pathlib import Path
-import yaml
 
-def train_on_tinker(config_path: Path, dataset_path: Path, output_dir: Path):
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    
-    client = Client()
-    
-    # Upload dataset
-    dataset_id = client.data.upload(
-        str(dataset_path),
-        name=f"compression-{dataset_path.stem}"
+from tinker import ServiceClient
+
+from src.training.train_tinker import TinkerTrainingConfig, run_training_loop, write_run_metadata
+from src.utils.config import load_tinker_training_config
+
+
+def train_on_tinker_from_config(config_path: Path, output_dir: Path) -> Path:
+    config = load_tinker_training_config(config_path)
+    service_client = ServiceClient(api_key=os.environ["TINKER_API_KEY"])
+    training_client = service_client.create_lora_training_client(
+        base_model=config.base_model,
     )
-    
-    # Configure training
-    train_config = TrainingConfig(
-        model=config["model"]["name"],  # "Qwen/Qwen3-8B"
-        dataset=dataset_id,
-        lora=LoraConfig(
-            r=config["lora"]["r"],
-            alpha=config["lora"]["alpha"],
-            target_modules=config["lora"]["target_modules"],
-        ),
-        epochs=config["training"]["epochs"],
-        batch_size=config["training"]["batch_size"],
-        learning_rate=config["training"]["lr"],
-    )
-    
-    # Start training
-    job = client.train(train_config)
-    print(f"Training job started: {job.id}")
-    
-    # Wait for completion
-    job.wait()
-    print(f"Training complete. Final loss: {job.metrics['loss']}")
-    
-    # Download adapter
-    adapter_path = output_dir / "tinker_adapter"
-    job.download_adapter(str(adapter_path))
-    print(f"Adapter saved to: {adapter_path}")
-    
-    return adapter_path
+    metadata = run_training_loop(training_client, config)
+    return write_run_metadata(metadata, output_dir=output_dir)
+
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default="configs/training.yaml")
-    parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default="models/adapters")
+    parser.add_argument("--output", type=Path, default="models/adapters/tinker")
     args = parser.parse_args()
-    train_on_tinker(args.config, args.dataset, args.output)
+    metadata_path = train_on_tinker_from_config(args.config, args.output)
+    print(f"Run metadata: {metadata_path}")
 ```
 
 ### 3.3 Local MLX Training Script
@@ -496,36 +473,36 @@ if __name__ == "__main__":
 ```yaml
 # configs/training.yaml
 
-# === TINKER (Production) ===
-model:
-  name: "Qwen/Qwen3-8B"
-  # Alternatives:
-  #   - Qwen/Qwen3-4B-Instruct-2507 (faster, cheaper)
-  #   - Qwen/Qwen3-30B-A3B (MoE, good quality/cost ratio)
-
-lora:
-  r: 64
-  alpha: 128
-  target_modules:
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
-    - gate_proj
-    - up_proj
-    - down_proj
-
-training:
-  epochs: 3
-  batch_size: 4
-  lr: 2.0e-4
-
-# === LOCAL MLX (Iteration) ===
+# === LOCAL (MLX on M4 Pro) ===
 local:
-  model: "mlx-community/Qwen3-4B-4bit"
-  batch_size: 2
-  iters: 1000
-  lr: 1.0e-4
+  model: "mlx-community/Qwen3-4B-Instruct-4bit"
+  lora:
+    rank: 8
+    alpha: 16
+  training:
+    iters: 500
+    batch_size: 2
+    learning_rate: 1.0e-4
+
+# === CLOUD (Tinker) ===
+cloud:
+  model: "Qwen/Qwen3-8B"
+  lora:
+    rank: 64
+    alpha: 128
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+  training:
+    epochs: 3
+    steps: 300 # If omitted, computed as epochs * 100
+    batch_size: 4
+    learning_rate: 2.0e-4
 
 # === DATA ===
 data:
@@ -673,7 +650,7 @@ train-local:
 train-cloud:
 	python scripts/train_tinker.py \
 		--config configs/training.yaml \
-		--dataset data/validated/train.jsonl
+		--output models/adapters/tinker
 
 # Validation
 validate:
