@@ -97,7 +97,7 @@ def main() -> int:
     with open(args.output, mode, encoding="utf-8") as f:
         compressions = generator.compress_batch(texts, show_progress=True)
 
-        for text, compressed in zip(texts, compressions):
+        for text, compressed in zip(texts, compressions, strict=True):
             pair = GeneratedPair(
                 verbose=text,
                 compressed=compressed,

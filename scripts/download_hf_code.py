@@ -11,8 +11,8 @@ import argparse
 import hashlib
 import json
 import sys
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Callable, Iterable
 
 from datasets import load_dataset
 from rich.console import Console

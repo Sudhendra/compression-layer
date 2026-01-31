@@ -16,7 +16,6 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Iterable
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -39,6 +38,13 @@ def load_pairs(path: Path) -> list[GeneratedPair]:
             if line.strip():
                 pairs.append(GeneratedPair(**json.loads(line)))
     return pairs
+
+
+def _write_lines(path: Path, lines: list[str], mode: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, mode, encoding="utf-8") as f:
+        for line in lines:
+            f.write(line)
 
 
 async def validate_batch(
@@ -65,8 +71,6 @@ async def validate_batch(
             equivalence_threshold=threshold,
         )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
     passed = 0
     failed = 0
 
@@ -82,21 +86,26 @@ async def validate_batch(
             result = await harness.validate_pair(compression_pair)
             return result.min_equivalence >= threshold, pair
 
+    await asyncio.to_thread(_write_lines, output_path, [], "w")
+
     with Progress() as progress:
         task = progress.add_task("Validating...", total=len(pairs))
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            for i in range(0, len(pairs), max(1, concurrency * 2)):
-                batch = pairs[i : i + max(1, concurrency * 2)]
-                results = await asyncio.gather(*[validate_one(p) for p in batch])
+        for i in range(0, len(pairs), max(1, concurrency * 2)):
+            batch = pairs[i : i + max(1, concurrency * 2)]
+            results = await asyncio.gather(*[validate_one(p) for p in batch])
 
-                for is_pass, pair in results:
-                    if is_pass:
-                        passed += 1
-                        f.write(json.dumps(pair.model_dump()) + "\n")
-                    else:
-                        failed += 1
-                    progress.advance(task)
+            lines: list[str] = []
+            for is_pass, pair in results:
+                if is_pass:
+                    passed += 1
+                    lines.append(json.dumps(pair.model_dump()) + "\n")
+                else:
+                    failed += 1
+                progress.advance(task)
+
+            if lines:
+                await asyncio.to_thread(_write_lines, output_path, lines, "a")
 
     return {"passed": passed, "failed": failed, "total": len(pairs)}
 

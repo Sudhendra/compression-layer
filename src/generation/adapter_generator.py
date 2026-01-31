@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 class AdapterGenerator:
@@ -65,10 +65,7 @@ class AdapterGenerator:
 
         if output.startswith("```") and output.endswith("```"):
             lines = output.split("\n")
-            if len(lines) >= 2:
-                output = "\n".join(lines[1:-1]).strip()
-            else:
-                output = output[3:-3].strip()
+            output = "\n".join(lines[1:-1]).strip() if len(lines) >= 2 else output[3:-3].strip()
 
         return output
 
