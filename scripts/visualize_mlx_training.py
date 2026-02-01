@@ -430,7 +430,7 @@ class MLXLogVisualizer:
             output_path: Path to save the figure (if None, displays instead)
             dpi: Resolution of the saved figure
         """
-        # Determine layout based on available metrics
+        # Determine layout based ontr_ available metrics
         has_performance = len(self.metrics.iterations_per_sec) > 0
         has_memory = len(self.metrics.peak_memory) > 0
         has_tokens = len(self.metrics.trained_tokens) > 0
