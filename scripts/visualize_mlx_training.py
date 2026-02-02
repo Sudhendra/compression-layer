@@ -336,7 +336,7 @@ class MLXLogVisualizer:
         """
         if output_dir is None:
             print("Error: output_dir must be specified for individual plots")
-            return
+            return []
 
         # Ensure output directory exists
         output_path = Path(output_dir)
