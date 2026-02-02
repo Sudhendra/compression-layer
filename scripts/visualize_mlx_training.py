@@ -670,12 +670,16 @@ class MLXLogVisualizer:
 
         if len(self.metrics.train_losses) > 0:
             print("\nTraining Loss:")
-            print(f"  Initial: {self.metrics.train_losses[0]:.4f}")
-            print(f"  Final:   {self.metrics.train_losses[-1]:.4f}")
+            initial_loss = self.metrics.train_losses[0]
+            final_loss = self.metrics.train_losses[-1]
+            print(f"  Initial: {initial_loss:.4f}")
+            print(f"  Final:   {final_loss:.4f}")
             print(f"  Min:     {min(self.metrics.train_losses):.4f}")
-            print(
-                f"  Reduction: {(1 - self.metrics.train_losses[-1] / self.metrics.train_losses[0]) * 100:.2f}%"
-            )
+            if initial_loss != 0:
+                reduction = (1 - final_loss / initial_loss) * 100
+                print(f"  Reduction: {reduction:.2f}%")
+            else:
+                print("  Reduction: N/A (initial loss is zero)")
 
         if len(self.metrics.val_losses) > 0:
             print("\nValidation Loss:")
