@@ -59,6 +59,7 @@ dmypy.json
 # Data directories (large files, generated content)
 data/raw/
 data/seed/
+data/synthetic/
 data/validated/
 data/final/
 data/cache/
