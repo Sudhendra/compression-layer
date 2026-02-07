@@ -1,13 +1,40 @@
-# sanitize_training_data_v2.py
+#!/usr/bin/env python3
 """
-Data Sanitization for Compression Training - Version 2
-Implements Option 2: Separate validation rules for code vs natural language
+Data Sanitization for Compression Training 
+
+SCOPE: This script is designed specifically for data/training/train.jsonl
+       with chat-message format (system/user/assistant roles).
+
+Usage:
+    # Default paths
+    python data_sanitization.py
+    
+    # Custom paths
+    python data_sanitization.py \
+        --input data/training/train.jsonl \
+        --sanitized data/training/sanitized_train.jsonl \
+        --unsanitized data/training/unsanitized_train.jsonl
+
+CHANGES FROM V3:
+- Rule B now code-aware: allows leading @ for code samples (decorators)
+- Token-based compression ratio aligned with src/utils/tokenizers.py
+- Explicit format validation with parse error logging
+- Guards for unexpected message structures
+- CLI arguments for flexible path configuration
+
+Extracts BOTH sanitized and unsanitized samples in one pass.
+Unsanitized samples are saved for recovery analysis.
 """
 
+import argparse
 import json
 import re
-from collections import defaultdict
+import sys
 from pathlib import Path
+
+# Import tokenizer for token-based ratios
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from src.utils.tokenizers import compression_ratio
 
 # ============================================================================
 # SYMBOL DEFINITIONS
@@ -68,7 +95,6 @@ NEGATION_KEYWORDS = [
 
 # Code detection indicators
 CODE_INDICATORS = [
-    # Python
     "def ",
     "class ",
     "import ",
@@ -85,14 +111,12 @@ CODE_INDICATORS = [
     "@classmethod",
     "@staticmethod",
     "@property",
-    # JavaScript/TypeScript
     "function ",
     "const ",
     "let ",
     "var ",
     "=>",
     "async function",
-    # General programming
     "fn:",
     "->",
     "fn(",
@@ -100,18 +124,17 @@ CODE_INDICATORS = [
     "int ",
     "string ",
     "bool ",
-    # Code blocks
     "```",
     "```python",
     "```javascript",
     "```java",
-    # Common syntax patterns
     "    def ",
-    "    class ",  # Indented code
+    "    class ",
 ]
 
+
 # ============================================================================
-# CONTENT TYPE DETECTION
+# HELPER FUNCTIONS
 # ============================================================================
 
 
@@ -119,116 +142,234 @@ def is_code_sample(verbose: str) -> bool:
     """
     Detect if sample is code-related.
 
-    Returns True if:
-    - Contains code indicators
-    - Has significant indentation patterns
-    - Contains common programming syntax
+    Uses multiple signals to avoid misclassifying brace-heavy text (JSON, etc.) as code.
+    Requires at least 2 strong signals OR 1 very strong signal.
     """
     verbose_lower = verbose.lower()
 
-    # Check for explicit code indicators
-    for indicator in CODE_INDICATORS:
-        if indicator.lower() in verbose_lower:
-            return True
-
-    # Check for code-like structure
-    lines = verbose.split("\n")
-
-    # Multiple indented lines suggest code
-    indented_lines = sum(1 for line in lines if line.startswith("    ") or line.startswith("\t"))
-    if indented_lines >= 2:
-        return True
-
-    # Check for common code patterns
-    code_patterns = [
-        r"\bdef\s+\w+\(",  # Python functions
-        r"\bclass\s+\w+[\(:]",  # Python classes
-        r"function\s+\w+\(",  # JS functions
-        r"\w+\s*=\s*function\(",  # JS function assignment
-        r"\w+\s*:\s*\w+\s*[,\)]",  # Type annotations
-        r"\{[\s\S]*\}",  # Code blocks with braces
+    # Very strong signals (definitive code indicators)
+    very_strong_indicators = [
+        "def ",
+        "class ",
+        "function ",
+        "import ",
+        "return ",
+        "async ",
+        "await ",
+        "yield ",
+        "@property",
+        "@staticmethod",
+        "@classmethod",
+        "fn:",
+        "lambda ",
+        "isinstance(",
+        "raise ",
     ]
 
-    return any(re.search(pattern, verbose) for pattern in code_patterns)
+    for indicator in very_strong_indicators:
+        if indicator.lower() in verbose_lower:
+            return True  # Single very strong signal is enough
+
+    # Strong signals (likely code)
+    strong_signals = 0
+
+    # Check for code-specific keywords
+    code_keywords = [
+        "self.",
+        "__init__",
+        "const ",
+        "let ",
+        "var ",
+        "void ",
+        "int ",
+        "string ",
+        "bool ",
+    ]
+    for keyword in code_keywords:
+        if keyword.lower() in verbose_lower:
+            strong_signals += 1
+            break  # Count once
+
+    # Check for indentation pattern (multiple indented lines)
+    lines = verbose.split("\n")
+    indented_lines = sum(1 for line in lines if line.startswith("    ") or line.startswith("\t"))
+    if indented_lines >= 3:  # Increased threshold from 2 to 3
+        strong_signals += 1
+
+    # Check for code block markers
+    if (
+        "```python" in verbose_lower
+        or "```javascript" in verbose_lower
+        or "```java" in verbose_lower
+    ):
+        strong_signals += 1
+
+    # Tightened code patterns - require more context
+    code_patterns = [
+        r"\bdef\s+\w+\s*\(",
+        r"\bclass\s+\w+\s*[\(:]",
+        r"\bfunction\s+\w+\s*\(",
+        r"\w+\s*=\s*function\s*\(",
+        # Tightened type annotation pattern - require multiple
+        r"(\w+\s*:\s*\w+.*){2,}",  # At least 2 type annotations
+    ]
+
+    for pattern in code_patterns:
+        if re.search(pattern, verbose):
+            strong_signals += 1
+            break  # Count once
+
+    # Tightened {...} check - only count if it looks like actual code block
+    # Must have semicolons, return statements, or assignment inside braces
+    brace_code_pattern = r"\{[^}]*(;|return\s|=\s)[^}]*\}"
+    if re.search(brace_code_pattern, verbose):
+        strong_signals += 1
+
+    # Require at least 2 strong signals to classify as code
+    return strong_signals >= 2
 
 
-# ============================================================================
-# EXTRACTION HELPERS
-# ============================================================================
+def extract_verbose_compressed(
+    sample: dict, sample_id: int
+) -> tuple[str | None, str | None, str | None]:
+    """
+    Extract input (verbose) and output (compressed) from chat message structure.
 
+    EXPECTED FORMAT for data/training/train.jsonl:
+    {
+        "messages": [
+            {"role": "system", "content": "..."},
+            {"role": "user", "content": "Compress:\n<text>"},
+            {"role": "assistant", "content": "<compressed>"}
+        ]
+    }
 
-def extract_verbose_compressed(sample: dict) -> tuple[str, str]:
-    """Extract input (verbose) and output (compressed) from message structure."""
+    Returns:
+        (verbose, compressed, error_message)
+        error_message is None if parsing succeeded
+    """
+    # Validate top-level structure
+    if not isinstance(sample, dict):
+        return None, None, f"Sample {sample_id}: Not a dict"
+
+    if "messages" not in sample:
+        return None, None, f"Sample {sample_id}: Missing 'messages' key"
+
     messages = sample.get("messages", [])
+
+    if not isinstance(messages, list):
+        return None, None, f"Sample {sample_id}: 'messages' is not a list"
+
+    if len(messages) < 2:
+        return (
+            None,
+            None,
+            f"Sample {sample_id}: Expected at least 2 messages (user + assistant), got {len(messages)}",
+        )
 
     verbose = ""
     compressed = ""
+    found_user = False
+    found_assistant = False
 
     for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+
         role = msg.get("role", "")
         content = msg.get("content", "")
 
-        if role == "user" and "Compress:" in content:
-            verbose = content.split("Compress:", 1)[1].strip()
+        if role == "user":
+            found_user = True
+            if "Compress:" in content:
+                verbose = content.split("Compress:", 1)[1].strip()
+            else:
+                return (
+                    None,
+                    None,
+                    f"Sample {sample_id}: User message doesn't contain 'Compress:' marker",
+                )
+
         elif role == "assistant":
+            found_assistant = True
             compressed = content.strip()
 
-    return verbose, compressed
+    # Validate we found expected roles
+    if not found_user:
+        return None, None, f"Sample {sample_id}: No user message found"
+
+    if not found_assistant:
+        return None, None, f"Sample {sample_id}: No assistant message found"
+
+    if not verbose:
+        return None, None, f"Sample {sample_id}: Empty verbose text after 'Compress:'"
+
+    if not compressed:
+        return None, None, f"Sample {sample_id}: Empty compressed text"
+
+    return verbose, compressed, None
 
 
-def compute_compression_ratio(verbose: str, compressed: str) -> float:
-    """Compute word-level compression ratio."""
-    v_words = len(verbose.split())
-    c_words = len(compressed.split())
+def compute_compression_ratio_tokens(verbose: str, compressed: str) -> float:
+    """
+    Compute token-based compression ratio aligned with src/utils/tokenizers.py.
 
-    if c_words == 0:
-        return 0.0
-
-    return v_words / c_words
+    Returns compression_ratio where ratio > 1.0 means expansion (bad).
+    For Rule A, we want ratio <= 1.0 (compressed <= verbose in tokens).
+    """
+    return compression_ratio(verbose, compressed)
 
 
 # ============================================================================
-# VALIDATION RULES - UNIVERSAL (Apply to both code and NL)
+# VALIDATION RULES
 # ============================================================================
 
 
 def rule_a_ratio_check(verbose: str, compressed: str) -> tuple[bool, str]:
-    """Rule A: Remove samples with compression ratio < 1.0 (longer than input)"""
-    ratio = compute_compression_ratio(verbose, compressed)
+    """
+    Rule A: Remove samples with compression ratio > 1.0 (expansion).
 
-    if ratio < 1.0:
-        return False, f"Ratio {ratio:.2f} < 1.0 (compressed is longer than input)"
+    Uses token-based ratio from src/utils/tokenizers.py.
+    Ratio > 1.0 means compressed text is longer than input (bad compression).
+    """
+    ratio = compute_compression_ratio_tokens(verbose, compressed)
 
+    # compression_ratio returns compressed/verbose
+    # We want compressed <= verbose, so ratio <= 1.0
+    if ratio > 1.0:
+        return False, f"Ratio {ratio:.2f} > 1.0 (expansion)"
     return True, ""
 
 
-def rule_b_orphaned_symbols(compressed: str) -> tuple[bool, str]:
-    """Rule B: Remove samples with orphaned symbols (at start/end or consecutive)"""
+def rule_b_orphaned_symbols(compressed: str, is_code: bool) -> tuple[bool, str]:
+    """
+    Rule B: Remove samples with orphaned symbols.
+
+    CODE-AWARE: Allows leading @ for code samples (Python decorators).
+    """
     if not compressed:
         return False, "Empty compression"
 
-    # Check start (allow ``` for code blocks)
+    # Check leading symbol - allow @ for code samples (decorators)
     if compressed[0] in SYMBOLS:
-        return False, f"Orphaned symbol at start: '{compressed[0]}'"
+        if is_code and compressed[0] == "@":
+            # Valid decorator pattern
+            pass
+        else:
+            return False, f"Orphaned symbol at start: '{compressed[0]}'"
 
-    # Check end
+    # Check trailing symbol (: is allowed at end)
     if compressed[-1] in SYMBOLS and compressed[-1] != ":":
         return False, f"Orphaned symbol at end: '{compressed[-1]}'"
 
-    # Check consecutive symbols (except :: which is valid)
+    # Check consecutive symbols (except ::)
     for i in range(len(compressed) - 1):
         if compressed[i] in SYMBOLS and compressed[i + 1] in SYMBOLS:
-            # Allow :: (type annotation)
             if compressed[i] == ":" and compressed[i + 1] == ":":
-                continue
+                continue  # :: is allowed (namespace separator)
             return False, f"Consecutive symbols: '{compressed[i]}{compressed[i + 1]}'"
 
     return True, ""
-
-
-# ============================================================================
-# VALIDATION RULES - NATURAL LANGUAGE ONLY
-# ============================================================================
 
 
 def rule_c_negation_preservation(verbose: str, compressed: str) -> tuple[bool, str]:
@@ -236,56 +377,61 @@ def rule_c_negation_preservation(verbose: str, compressed: str) -> tuple[bool, s
     verbose_lower = verbose.lower()
     compressed_lower = compressed.lower()
 
-    # Check if input has negation
     has_input_negation = any(
         re.search(r"\b" + re.escape(kw) + r"\b", verbose_lower) for kw in NEGATION_KEYWORDS
     )
 
     if not has_input_negation:
-        return True, ""  # No negation to preserve
+        return True, ""
 
-    # Check if output preserved negation
     has_output_negation = any(
         re.search(r"\b" + re.escape(kw) + r"\b", compressed_lower) for kw in NEGATION_KEYWORDS
     )
 
-    # Check for negation symbols
     has_neg_symbol = "¬" in compressed or "~" in compressed or "!" in compressed
 
     if not (has_output_negation or has_neg_symbol):
-        return False, "Negation present in input but lost in compression"
+        return False, "Negation lost"
 
     return True, ""
 
 
 def rule_d_semantic_symbol_usage_nl(verbose: str, compressed: str) -> tuple[bool, str]:
-    """Rule D: Remove samples that should use @ or ∵ but don't (NL only, strict keywords)"""
+    """Rule D: Remove samples that should use @ or ∵ but don't (NL only)"""
     verbose_lower = verbose.lower()
 
-    # Check location context (strict multi-word phrases)
     has_location_context = any(kw in verbose_lower for kw in LOCATION_KEYWORDS_NL)
     if has_location_context and "@" not in compressed:
-        return False, "Location context present but '@' not used"
+        return False, "Location context but no '@'"
 
-    # Check causation context (strict multi-word phrases)
     has_causation_context = any(kw in verbose_lower for kw in CAUSATION_KEYWORDS_NL)
     if has_causation_context and "∵" not in compressed:
-        return False, "Causation context present but '∵' not used"
+        return False, "Causation context but no '∵'"
 
     return True, ""
 
 
 # ============================================================================
-# MAIN SANITIZATION
+# MAIN SANITIZATION + EXTRACTION
 # ============================================================================
 
 
-def sanitize_dataset(input_path: Path, output_path: Path) -> dict:
+def sanitize_and_extract(input_path: Path, sanitized_path: Path, unsanitized_path: Path) -> dict:
     """
-    Apply filtering rules separately for code and NL samples.
+    Single-pass processing: sanitize AND extract unsanitized samples.
+    Both outputs maintain original JSON structure.
 
-    Returns statistics dictionary.
+    SCOPE: Designed for data/training/train.jsonl with chat-message format.
     """
+    # Validate input file exists
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    # Validate expected location
+    if input_path.name != "train.jsonl":
+        print(f"⚠ WARNING: Expected train.jsonl, got {input_path.name}")
+        print("  This script is designed for data/training/train.jsonl format")
+
     print(f"Loading data from {input_path}...")
 
     with open(input_path, encoding="utf-8") as f:
@@ -293,7 +439,6 @@ def sanitize_dataset(input_path: Path, output_path: Path) -> dict:
 
     print(f"✓ Loaded {len(data)} samples\n")
 
-    # Track statistics
     stats = {
         "total_input": len(data),
         "code_samples": 0,
@@ -304,35 +449,33 @@ def sanitize_dataset(input_path: Path, output_path: Path) -> dict:
         "rule_b_failed": 0,
         "rule_c_failed": 0,
         "rule_d_failed": 0,
+        "parse_errors": 0,
         "passed_all": 0,
+        "failed_all": 0,
         "failed_samples": [],
         "passed_samples": [],
-        "code_failed_samples": [],
-        "nl_failed_samples": [],
+        "parse_error_samples": [],
     }
 
     sanitized_data = []
+    unsanitized_data = []
 
-    print("Applying filtering rules...\n")
-    print("=" * 80)
+    print("Processing samples...\n")
 
     for idx, sample in enumerate(data):
-        verbose, compressed = extract_verbose_compressed(sample)
+        # Extract with format validation
+        verbose, compressed, parse_error = extract_verbose_compressed(sample, idx)
 
-        if not verbose or not compressed:
-            stats["rule_a_failed"] += 1
-            stats["failed_samples"].append(
-                {
-                    "id": idx,
-                    "type": "unknown",
-                    "reason": "Missing input or output",
-                    "verbose": verbose[:50] if verbose else "",
-                    "compressed": compressed[:50] if compressed else "",
-                }
-            )
-            continue
+        # Handle parse errors - tracked separately from rule failures
+        # Parse errors are NOT counted as Rule A failures
+        if parse_error:
+            stats["parse_errors"] += 1
+            stats["failed_all"] += 1
+            unsanitized_data.append(sample)
+            stats["parse_error_samples"].append({"id": idx, "error": parse_error, "sample": sample})
+            print(f"⚠ {parse_error}")
+            continue  # Skip rule validation for malformed samples
 
-        # Detect content type
         is_code = is_code_sample(verbose)
         content_type = "code" if is_code else "nl"
 
@@ -341,42 +484,47 @@ def sanitize_dataset(input_path: Path, output_path: Path) -> dict:
         else:
             stats["nl_samples"] += 1
 
-        # Apply rules based on content type
+        # Apply all rules
         passed = True
         failure_reason = ""
+        failed_rules = []
 
-        # Rule A: Compression ratio (UNIVERSAL)
+        # Rule A (universal) - token-based ratio
         rule_a_pass, reason = rule_a_ratio_check(verbose, compressed)
         if not rule_a_pass:
             stats["rule_a_failed"] += 1
             passed = False
             failure_reason = f"Rule A: {reason}"
+            failed_rules.append("A")
 
-        # Rule B: Orphaned symbols (UNIVERSAL)
+        # Rule B (universal, code-aware)
         if passed:
-            rule_b_pass, reason = rule_b_orphaned_symbols(compressed)
+            rule_b_pass, reason = rule_b_orphaned_symbols(compressed, is_code)
             if not rule_b_pass:
                 stats["rule_b_failed"] += 1
                 passed = False
                 failure_reason = f"Rule B: {reason}"
+                failed_rules.append("B")
 
-        # Rule C: Negation preservation (NL ONLY)
+        # Rule C (NL only)
         if passed and not is_code:
             rule_c_pass, reason = rule_c_negation_preservation(verbose, compressed)
             if not rule_c_pass:
                 stats["rule_c_failed"] += 1
                 passed = False
                 failure_reason = f"Rule C: {reason}"
+                failed_rules.append("C")
 
-        # Rule D: Semantic symbol usage (NL ONLY)
+        # Rule D (NL only)
         if passed and not is_code:
             rule_d_pass, reason = rule_d_semantic_symbol_usage_nl(verbose, compressed)
             if not rule_d_pass:
                 stats["rule_d_failed"] += 1
                 passed = False
                 failure_reason = f"Rule D: {reason}"
+                failed_rules.append("D")
 
-        # Record result
+        # Sort into sanitized or unsanitized
         if passed:
             stats["passed_all"] += 1
             if is_code:
@@ -389,44 +537,49 @@ def sanitize_dataset(input_path: Path, output_path: Path) -> dict:
                 {
                     "id": idx,
                     "type": content_type,
-                    "ratio": compute_compression_ratio(verbose, compressed),
-                    "compressed": compressed[:80],
+                    "ratio": compute_compression_ratio_tokens(verbose, compressed),
                 }
             )
         else:
-            failed_entry = {
-                "id": idx,
-                "type": content_type,
-                "reason": failure_reason,
-                "verbose": verbose[:80],
-                "compressed": compressed[:80],
-            }
-            stats["failed_samples"].append(failed_entry)
+            stats["failed_all"] += 1
+            unsanitized_data.append(sample)
+            stats["failed_samples"].append(
+                {
+                    "id": idx,
+                    "type": content_type,
+                    "reason": failure_reason,
+                    "failed_rules": failed_rules,
+                    "sample": sample,
+                }
+            )
 
-            if is_code:
-                stats["code_failed_samples"].append(failed_entry)
-            else:
-                stats["nl_failed_samples"].append(failed_entry)
-
-    # Save sanitized data
-    print(f"\nSaving sanitized data to {output_path}...")
-    with open(output_path, "w", encoding="utf-8") as f:
+    # Save sanitized
+    print(f"\nSaving sanitized data to {sanitized_path}...")
+    sanitized_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(sanitized_path, "w", encoding="utf-8") as f:
         for sample in sanitized_data:
-            f.write(json.dumps(sample) + "\n")
+            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    print(f"✓ Saved {len(sanitized_data)} sanitized samples")
 
-    print(f"✓ Saved {len(sanitized_data)} sanitized samples\n")
+    # Save unsanitized
+    print(f"Saving unsanitized data to {unsanitized_path}...")
+    unsanitized_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(unsanitized_path, "w", encoding="utf-8") as f:
+        for sample in unsanitized_data:
+            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    print(f"✓ Saved {len(unsanitized_data)} unsanitized samples\n")
 
     return stats
 
 
 def print_statistics(stats: dict):
-    """Print detailed statistics about sanitization."""
+    """Print statistics."""
     print("=" * 80)
-    print("SANITIZATION STATISTICS - OPTION 2 (Code vs NL Split)")
+    print("PROCESSING STATISTICS")
     print("=" * 80)
     print()
 
-    print(f"Total input samples:        {stats['total_input']:5d}")
+    print(f"Total input:                {stats['total_input']:5d}")
     print(
         f"  Code samples:             {stats['code_samples']:5d} ({stats['code_samples'] / stats['total_input'] * 100:5.1f}%)"
     )
@@ -436,221 +589,149 @@ def print_statistics(stats: dict):
     print()
 
     print(
-        f"Passed all rules:           {stats['passed_all']:5d} ({stats['passed_all'] / stats['total_input'] * 100:5.1f}%)"
+        f"✓ SANITIZED (passed):       {stats['passed_all']:5d} ({stats['passed_all'] / stats['total_input'] * 100:5.1f}%)"
     )
     print(
-        f"  Code passed:              {stats['code_passed']:5d} ({stats['code_passed'] / stats['code_samples'] * 100 if stats['code_samples'] > 0 else 0:5.1f}%)"
+        f"  Code:                     {stats['code_passed']:5d} ({stats['code_passed'] / stats['code_samples'] * 100 if stats['code_samples'] > 0 else 0:5.1f}%)"
     )
     print(
-        f"  NL passed:                {stats['nl_passed']:5d} ({stats['nl_passed'] / stats['nl_samples'] * 100 if stats['nl_samples'] > 0 else 0:5.1f}%)"
+        f"  NL:                       {stats['nl_passed']:5d} ({stats['nl_passed'] / stats['nl_samples'] * 100 if stats['nl_samples'] > 0 else 0:5.1f}%)"
+    )
+    print()
+
+    print(
+        f"✗ UNSANITIZED (failed):     {stats['failed_all']:5d} ({stats['failed_all'] / stats['total_input'] * 100:5.1f}%)"
     )
     print()
 
     print("Failed by rule:")
-    print(f"  Rule A (ratio < 1.0):     {stats['rule_a_failed']:5d} (universal)")
-    print(f"  Rule B (orphaned symbols):{stats['rule_b_failed']:5d} (universal)")
-    print(f"  Rule C (lost negation):   {stats['rule_c_failed']:5d} (NL only)")
-    print(f"  Rule D (missing @ or ∵):  {stats['rule_d_failed']:5d} (NL only)")
+    print(f"  Rule A (ratio > 1.0):     {stats['rule_a_failed']:5d}")
+    print(f"  Rule B (orphaned symbols):{stats['rule_b_failed']:5d}")
+    print(f"  Rule C (lost negation):   {stats['rule_c_failed']:5d}")
+    print(f"  Rule D (missing @ or ∵):  {stats['rule_d_failed']:5d}")
+    print(f"  Parse errors:             {stats['parse_errors']:5d}")
     print()
 
-    total_failed = len(stats["failed_samples"])
-    print(
-        f"Total failed:               {total_failed:5d} ({total_failed / stats['total_input'] * 100:5.1f}%)"
-    )
-    print()
-
-    # Show examples of failed CODE samples
-    print("=" * 80)
-    print("FAILED CODE SAMPLES (First 5 examples)")
-    print("=" * 80)
-    print()
-
-    code_failed = stats["code_failed_samples"][:5]
-    if code_failed:
-        for sample in code_failed:
-            print(f"Sample {sample['id']} (CODE):")
-            print(f"  Reason: {sample['reason']}")
-            print(f"  Input:  {sample['verbose']}...")
-            print(f"  Output: {sample['compressed']}...")
-            print()
-    else:
-        print("No code samples failed.\n")
-
-    # Show examples of failed NL samples
-    print("=" * 80)
-    print("FAILED NL SAMPLES (First 5 examples)")
-    print("=" * 80)
-    print()
-
-    nl_failed = stats["nl_failed_samples"][:5]
-    if nl_failed:
-        for sample in nl_failed:
-            print(f"Sample {sample['id']} (NL):")
-            print(f"  Reason: {sample['reason']}")
-            print(f"  Input:  {sample['verbose']}...")
-            print(f"  Output: {sample['compressed']}...")
-            print()
-    else:
-        print("No NL samples failed.\n")
-
-    # Show examples of passed samples (mixed)
-    print("=" * 80)
-    print("PASSED SAMPLES (First 10 examples - highest compression)")
-    print("=" * 80)
-    print()
-
-    sorted_passed = sorted(stats["passed_samples"], key=lambda x: x.get("ratio", 0), reverse=True)
-
-    for sample in sorted_passed[:10]:
-        print(
-            f"Sample {sample['id']} ({sample['type'].upper()}): Ratio {sample.get('ratio', 0):.2f}x"
-        )
-        print(f"  Output: {sample['compressed']}...")
+    # Show parse errors if any
+    if stats["parse_errors"] > 0:
+        print("=" * 80)
+        print("PARSE ERRORS (First 5)")
+        print("=" * 80)
         print()
+        for item in stats["parse_error_samples"][:5]:
+            print(f"Sample {item['id']}:")
+            print(f"  Error: {item['error']}")
+            print()
 
+    # Show sample failures
     print("=" * 80)
-    print("VERDICT")
-    print("=" * 80)
-    print()
-
-    retention_rate = stats["passed_all"] / stats["total_input"] * 100
-    code_retention = (
-        stats["code_passed"] / stats["code_samples"] * 100 if stats["code_samples"] > 0 else 0
-    )
-    nl_retention = stats["nl_passed"] / stats["nl_samples"] * 100 if stats["nl_samples"] > 0 else 0
-
-    print(f"Overall retention:          {retention_rate:.1f}%")
-    print(f"Code retention:             {code_retention:.1f}%")
-    print(f"NL retention:               {nl_retention:.1f}%")
-    print()
-
-    if retention_rate > 70:
-        print(f"✓ Good retention ({retention_rate:.1f}%)")
-        print("  Your data quality is decent. Proceed with training.")
-    elif retention_rate > 50:
-        print(f"⚠ Moderate retention ({retention_rate:.1f}%)")
-        print("  You lost some data but have enough to train.")
-    else:
-        print(f"❌ Low retention ({retention_rate:.1f}%)")
-        print("  Most of your data failed validation. Consider regenerating.")
-
-    print()
-
-    if code_retention < 80:
-        print(f"⚠ Code retention is low ({code_retention:.1f}%)")
-        print("  Many code samples are being filtered. Review code validation rules.")
-
-    if nl_retention < 60:
-        print(f"⚠ NL retention is low ({nl_retention:.1f}%)")
-        print("  Many NL samples are being filtered. Review NL validation rules.")
-
-    print()
-
-
-def analyze_symbol_distribution(sanitized_path: Path):
-    """Analyze symbol usage in sanitized data, split by code vs NL."""
-    print("=" * 80)
-    print("SYMBOL DISTRIBUTION IN SANITIZED DATA")
+    print("UNSANITIZED SAMPLES (First 5)")
     print("=" * 80)
     print()
 
-    with open(sanitized_path, encoding="utf-8") as f:
-        data = [json.loads(line) for line in f if line.strip()]
-
-    code_symbol_counts = defaultdict(int)
-    nl_symbol_counts = defaultdict(int)
-    code_total = 0
-    nl_total = 0
-
-    for sample in data:
-        verbose, compressed = extract_verbose_compressed(sample)
-        is_code = is_code_sample(verbose)
-
-        if is_code:
-            code_total += 1
-            for symbol in SYMBOLS:
-                if symbol in compressed:
-                    code_symbol_counts[symbol] += 1
-        else:
-            nl_total += 1
-            for symbol in SYMBOLS:
-                if symbol in compressed:
-                    nl_symbol_counts[symbol] += 1
-
-    print(f"Total sanitized samples: {len(data)}")
-    print(f"  Code: {code_total}")
-    print(f"  NL:   {nl_total}")
-    print()
-
-    print("CODE SAMPLES:")
-    for symbol in SYMBOLS:
-        count = code_symbol_counts[symbol]
-        pct = (count / code_total * 100) if code_total > 0 else 0
-        print(f"  {symbol} : {count:4d} / {code_total} ({pct:5.1f}%)")
-    print()
-
-    print("NL SAMPLES:")
-    for symbol in SYMBOLS:
-        count = nl_symbol_counts[symbol]
-        pct = (count / nl_total * 100) if nl_total > 0 else 0
-        print(f"  {symbol} : {count:4d} / {nl_total} ({pct:5.1f}%)")
-    print()
-
-    print("Expected behavior after Option 2 sanitization:")
-    print("  CODE: High @ usage (decorators), high : usage (types)")
-    print("  NL:   Balanced symbol usage, high @ and ∵ (enforced by Rule D)")
-    print()
+    for item in stats["failed_samples"][:5]:
+        print(f"Sample {item['id']} ({item.get('type', 'unknown').upper()}):")
+        print(f"  Reason: {item['reason']}")
+        print(f"  Failed rules: {', '.join(item.get('failed_rules', []))}")
+        print()
 
 
 # ============================================================================
-# MAIN EXECUTION
+# CLI
 # ============================================================================
 
 
 def main():
-    # File paths
-    input_path = Path("data/training/train.jsonl")
-    output_path = Path("data/training/sanitized_train.jsonl")
+    parser = argparse.ArgumentParser(
+        description="Sanitize compression training data with validation rules",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Use default paths
+  python data_sanitization.py
+  
+  # Custom paths
+  python data_sanitization.py \\
+      --input data/training/train.jsonl \\
+      --sanitized data/training/sanitized_train.jsonl \\
+      --unsanitized data/training/unsanitized_train.jsonl
+  
+  # Different dataset location
+  python data_sanitization.py \\
+      --input data/experiments/custom_train.jsonl \\
+      --sanitized data/experiments/custom_sanitized.jsonl \\
+      --unsanitized data/experiments/custom_unsanitized.jsonl
+
+Validation Rules:
+  Rule A: Compression ratio > 1.0 (expansion)
+  Rule B: Orphaned symbols (code-aware for @ decorators)
+  Rule C: Lost negation (NL only)
+  Rule D: Missing semantic symbols @ or ∵ (NL only)
+        """,
+    )
+
+    parser.add_argument(
+        "--input",
+        type=str,
+        default="data/training/train.jsonl",
+        help="Path to input training file (default: data/training/train.jsonl)",
+    )
+    parser.add_argument(
+        "--sanitized",
+        type=str,
+        default="data/training/sanitized_train.jsonl",
+        help="Path to output sanitized file (default: data/training/sanitized_train.jsonl)",
+    )
+    parser.add_argument(
+        "--unsanitized",
+        type=str,
+        default="data/training/unsanitized_train.jsonl",
+        help="Path to output unsanitized file (default: data/training/unsanitized_train.jsonl)",
+    )
+
+    args = parser.parse_args()
+
+    # Convert to Path objects
+    input_path = Path(args.input)
+    sanitized_path = Path(args.sanitized)
+    unsanitized_path = Path(args.unsanitized)
 
     print("\n" + "=" * 80)
-    print("DATA SANITIZATION - OPTION 2 (Code vs NL Split)")
+    print("DATA SANITIZATION + EXTRACTION (Single Pass)")
+    print("SCOPE: data/training/train.jsonl with chat-message format")
     print("=" * 80)
     print()
-    print("Filtering rules:")
-    print("  UNIVERSAL (Code + NL):")
-    print("    Rule A: Remove samples with compression ratio < 1.0")
-    print("    Rule B: Remove samples with orphaned symbols")
-    print("  NL ONLY:")
-    print("    Rule C: Remove samples that lost negation")
-    print("    Rule D: Remove samples missing @ or ∵ (strict keywords)")
+    print(f"Input:       {input_path}")
+    print(f"Sanitized:   {sanitized_path}")
+    print(f"Unsanitized: {unsanitized_path}")
+    print("=" * 80)
     print()
 
-    # Run sanitization
-    stats = sanitize_dataset(input_path, output_path)
+    # Process
+    stats = sanitize_and_extract(input_path, sanitized_path, unsanitized_path)
 
-    # Print statistics
+    # Print stats
     print_statistics(stats)
 
-    # Analyze symbol distribution
-    analyze_symbol_distribution(output_path)
-
+    print("=" * 80)
+    print("OUTPUT FILES")
+    print("=" * 80)
+    print()
+    print(f"1. {sanitized_path}")
+    print(f"   → {stats['passed_all']} samples (clean, ready for training)")
+    print()
+    print(f"2. {unsanitized_path}")
+    print(f"   → {stats['failed_all']} samples (for recovery analysis)")
+    print()
     print("=" * 80)
     print("NEXT STEPS")
     print("=" * 80)
     print()
-    print("1. Review the sanitized data:")
-    print(f"   cat {output_path} | head -n 5")
+    print("1. Train on sanitized data:")
+    print(f"   Use {sanitized_path} ({stats['passed_all']} samples)")
     print()
-    print("2. Train BASELINE model on original data:")
-    print("   (Use all 1759 samples from train.jsonl)")
-    print()
-    print("3. Train SANITIZED model on cleaned data:")
-    print(f"   (Use {stats['passed_all']} samples from sanitized_train.jsonl)")
-    print()
-    print("4. Compare models:")
-    print("   - Compression ratio")
-    print("   - Symbol usage (@, ∵)")
-    print("   - QA equivalence (most important)")
+    print("2. Analyze unsanitized samples for recovery:")
+    print(f"   Use {unsanitized_path} ({stats['failed_all']} samples)")
     print()
 
 

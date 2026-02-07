@@ -8,6 +8,11 @@ Usage:
     python dataset_manager.py --revert    # Switch back to original dataset
     python dataset_manager.py --status    # Check current state
     python dataset_manager.py --log       # View change history
+    
+    # With custom paths
+    python dataset_manager.py --update \
+        --train-file data/training/train.jsonl \
+        --sanitized data/training/sanitized_train.jsonl
 """
 
 import argparse
@@ -20,17 +25,33 @@ from pathlib import Path
 # CONFIGURATION
 # ============================================================================
 
-CONFIG = {
-    # Main training file (the one used by training scripts)
-    "active_train": Path("data/training/train.jsonl"),
-    # Backup of original data
-    "original_backup": Path("data/training/train.original.jsonl"),
-    # Sanitized data
-    "sanitized_data": Path("data/training/sanitized_train.jsonl"),
-    # State and log files
-    "state_file": Path("data/training/.dataset_state.json"),
-    "log_file": Path("data/training/.dataset_changes.log"),
-}
+
+def get_config(args) -> dict:
+    """Build configuration from CLI arguments with sensible defaults."""
+
+    # Use CLI args if provided, otherwise use defaults
+    train_file = Path(args.train_file) if args.train_file else Path("data/training/train.jsonl")
+    sanitized_file = (
+        Path(args.sanitized) if args.sanitized else Path("data/training/sanitized_train.jsonl")
+    )
+
+    # Derive backup path from train file
+    backup_file = train_file.parent / f"{train_file.stem}.original{train_file.suffix}"
+
+    # State files in same directory as train file
+    state_dir = train_file.parent
+
+    return {
+        # Main training file (the one used by training scripts)
+        "active_train": train_file,
+        # Backup of original data
+        "original_backup": backup_file,
+        # Sanitized data
+        "sanitized_data": sanitized_file,
+        # State and log files
+        "state_file": state_dir / ".dataset_state.json",
+        "log_file": state_dir / ".dataset_changes.log",
+    }
 
 
 # ============================================================================
@@ -38,27 +59,28 @@ CONFIG = {
 # ============================================================================
 
 
-def load_state() -> dict:
+def load_state(config: dict) -> dict:
     """Load current dataset state."""
-    if CONFIG["state_file"].exists():
-        with open(CONFIG["state_file"]) as f:
+    if config["state_file"].exists():
+        with open(config["state_file"]) as f:
             return json.load(f)
 
     return {
         "current": "original",  # 'original' or 'sanitized'
+        "last_action": None,  # 'update' or 'revert'
         "last_change": None,
         "change_count": 0,
     }
 
 
-def save_state(state: dict):
+def save_state(config: dict, state: dict):
     """Save dataset state."""
-    CONFIG["state_file"].parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG["state_file"], "w") as f:
+    config["state_file"].parent.mkdir(parents=True, exist_ok=True)
+    with open(config["state_file"], "w") as f:
         json.dump(state, f, indent=2)
 
 
-def log_change(action: str, from_state: str, to_state: str, details: str = ""):
+def log_change(config: dict, action: str, from_state: str, to_state: str, details: str = ""):
     """Log a dataset change."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -67,8 +89,8 @@ def log_change(action: str, from_state: str, to_state: str, details: str = ""):
         log_entry += f" | {details}"
     log_entry += "\n"
 
-    CONFIG["log_file"].parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG["log_file"], "a") as f:
+    config["log_file"].parent.mkdir(parents=True, exist_ok=True)
+    with open(config["log_file"], "a") as f:
         f.write(log_entry)
 
     print(f"✓ Logged: {log_entry.strip()}")
@@ -103,30 +125,30 @@ def count_samples(path):
     return count
 
 
-def verify_files_exist() -> bool:
+def verify_files_exist(config: dict) -> bool:
     """Verify required files exist."""
     errors = []
 
-    if not CONFIG["active_train"].exists():
-        errors.append(f"❌ Active training file not found: {CONFIG['active_train']}")
+    if not config["active_train"].exists():
+        errors.append(f"❌ Active training file not found: {config['active_train']}")
 
-    if not CONFIG["sanitized_data"].exists():
-        errors.append(f"❌ Sanitized data not found: {CONFIG['sanitized_data']}")
+    if not config["sanitized_data"].exists():
+        errors.append(f"❌ Sanitized data not found: {config['sanitized_data']}")
 
     if errors:
         print("\n".join(errors))
-        print("\nPlease run sanitize_training_data_v2.py first to generate sanitized data.")
+        print("\nPlease ensure sanitized data exists before updating.")
         return False
 
     return True
 
 
-def backup_original():
+def backup_original(config: dict):
     """Create backup of original data if it doesn't exist."""
-    if not CONFIG["original_backup"].exists() and CONFIG["active_train"].exists():
+    if not config["original_backup"].exists() and config["active_train"].exists():
         print("Creating backup of original data...")
-        shutil.copy2(CONFIG["active_train"], CONFIG["original_backup"])
-        print(f"✓ Backup created: {CONFIG['original_backup']}")
+        shutil.copy2(config["active_train"], config["original_backup"])
+        print(f"✓ Backup created: {config['original_backup']}")
         return True
     return False
 
@@ -136,23 +158,32 @@ def backup_original():
 # ============================================================================
 
 
-def update_to_sanitized() -> bool:
+def update_to_sanitized(config: dict) -> bool:
     """Switch to sanitized dataset."""
-    state = load_state()
+    state = load_state(config)
+
+    # Safety check: if last action was update, only allow revert
+    if state.get("last_action") == "update":
+        print("❌ Last action was already UPDATE.")
+        print("   You can only REVERT after an update.")
+        print()
+        print("To revert to original dataset, run:")
+        print(f"  python dataset_manager.py --revert --train-file {config['active_train']}")
+        return False
 
     if state["current"] == "sanitized":
         print("⚠ Already using sanitized dataset. No changes made.")
         return False
 
-    if not verify_files_exist():
+    if not verify_files_exist(config):
         return False
 
     # Create backup of original if needed
-    backup_original()
+    backup_original(config)
 
     # Get sample counts
-    original_count = count_samples(CONFIG["active_train"])
-    sanitized_count = count_samples(CONFIG["sanitized_data"])
+    original_count = count_samples(config["active_train"])
+    sanitized_count = count_samples(config["sanitized_data"])
 
     print("\nSwitching to sanitized dataset...")
     print(f"  Original samples:  {original_count}")
@@ -161,16 +192,18 @@ def update_to_sanitized() -> bool:
 
     # Perform swap
     try:
-        shutil.copy2(CONFIG["sanitized_data"], CONFIG["active_train"])
+        shutil.copy2(config["sanitized_data"], config["active_train"])
 
         # Update state
         state["current"] = "sanitized"
+        state["last_action"] = "update"
         state["last_change"] = datetime.now().isoformat()
         state["change_count"] += 1
-        save_state(state)
+        save_state(config, state)
 
         # Log change
         log_change(
+            config,
             action="UPDATE",
             from_state="original",
             to_state="sanitized",
@@ -178,7 +211,10 @@ def update_to_sanitized() -> bool:
         )
 
         print("\n✓ Successfully switched to sanitized dataset")
-        print(f"✓ {CONFIG['active_train']} now contains {sanitized_count} samples")
+        print(f"✓ {config['active_train']} now contains {sanitized_count} samples")
+        print()
+        print("⚠ To undo this change, run:")
+        print(f"  python dataset_manager.py --revert --train-file {config['active_train']}")
         return True
 
     except Exception as e:
@@ -186,22 +222,31 @@ def update_to_sanitized() -> bool:
         return False
 
 
-def revert_to_original() -> bool:
+def revert_to_original(config: dict) -> bool:
     """Revert to original dataset."""
-    state = load_state()
+    state = load_state(config)
+
+    # Safety check: if last action was revert, only allow update
+    if state.get("last_action") == "revert":
+        print("❌ Last action was already REVERT.")
+        print("   You can only UPDATE after a revert.")
+        print()
+        print("To switch to sanitized dataset, run:")
+        print(f"  python dataset_manager.py --update --train-file {config['active_train']}")
+        return False
 
     if state["current"] == "original":
         print("⚠ Already using original dataset. No changes made.")
         return False
 
-    if not CONFIG["original_backup"].exists():
-        print(f"❌ Original backup not found: {CONFIG['original_backup']}")
+    if not config["original_backup"].exists():
+        print(f"❌ Original backup not found: {config['original_backup']}")
         print("Cannot revert without backup.")
         return False
 
     # Get sample counts
-    sanitized_count = count_samples(CONFIG["active_train"])
-    original_count = count_samples(CONFIG["original_backup"])
+    sanitized_count = count_samples(config["active_train"])
+    original_count = count_samples(config["original_backup"])
 
     print("\nReverting to original dataset...")
     print(f"  Sanitized samples: {sanitized_count}")
@@ -209,16 +254,18 @@ def revert_to_original() -> bool:
 
     # Perform swap
     try:
-        shutil.copy2(CONFIG["original_backup"], CONFIG["active_train"])
+        shutil.copy2(config["original_backup"], config["active_train"])
 
         # Update state
         state["current"] = "original"
+        state["last_action"] = "revert"
         state["last_change"] = datetime.now().isoformat()
         state["change_count"] += 1
-        save_state(state)
+        save_state(config, state)
 
         # Log change
         log_change(
+            config,
             action="REVERT",
             from_state="sanitized",
             to_state="original",
@@ -226,7 +273,10 @@ def revert_to_original() -> bool:
         )
 
         print("\n✓ Successfully reverted to original dataset")
-        print(f"✓ {CONFIG['active_train']} now contains {original_count} samples")
+        print(f"✓ {config['active_train']} now contains {original_count} samples")
+        print()
+        print("⚠ To switch back to sanitized, run:")
+        print(f"  python dataset_manager.py --update --train-file {config['active_train']}")
         return True
 
     except Exception as e:
@@ -234,18 +284,27 @@ def revert_to_original() -> bool:
         return False
 
 
-def show_status():
+def show_status(config: dict):
     """Show current dataset status."""
-    state = load_state()
+    state = load_state(config)
 
     print("\n" + "=" * 80)
     print("DATASET STATUS")
     print("=" * 80)
     print()
 
+    # Configuration
+    print("Configuration:")
+    print(f"  Train file:         {config['active_train']}")
+    print(f"  Sanitized file:     {config['sanitized_data']}")
+    print(f"  Backup file:        {config['original_backup']}")
+    print()
+
     # Current state
     current = state["current"].upper()
+    last_action = state.get("last_action", "None")
     print(f"Current dataset:    {current}")
+    print(f"Last action:        {last_action.upper() if last_action else 'None'}")
     print(f"Total changes:      {state['change_count']}")
 
     if state["last_change"]:
@@ -259,38 +318,53 @@ def show_status():
     # File information
     print("Files:")
 
-    if CONFIG["active_train"].exists():
-        active_count = count_samples(CONFIG["active_train"])
-        print(f"  ✓ train.jsonl:              {active_count:4d} samples (ACTIVE)")
+    if config["active_train"].exists():
+        active_count = count_samples(config["active_train"])
+        print(f"  ✓ {config['active_train'].name:25s} {active_count:4d} samples (ACTIVE)")
     else:
-        print("  ❌ train.jsonl:              Not found")
+        print(f"  ❌ {config['active_train'].name:25s} Not found")
 
-    if CONFIG["original_backup"].exists():
-        original_count = count_samples(CONFIG["original_backup"])
-        print(f"  ✓ train.original.jsonl:     {original_count:4d} samples (backup)")
+    if config["original_backup"].exists():
+        original_count = count_samples(config["original_backup"])
+        print(f"  ✓ {config['original_backup'].name:25s} {original_count:4d} samples (backup)")
     else:
-        print("  ⚠ train.original.jsonl:     Not found (will be created on first update)")
+        print(
+            f"  ⚠ {config['original_backup'].name:25s} Not found (will be created on first update)"
+        )
 
-    if CONFIG["sanitized_data"].exists():
-        sanitized_count = count_samples(CONFIG["sanitized_data"])
-        print(f"  ✓ sanitized_train.jsonl:    {sanitized_count:4d} samples")
+    if config["sanitized_data"].exists():
+        sanitized_count = count_samples(config["sanitized_data"])
+        print(f"  ✓ {config['sanitized_data'].name:25s} {sanitized_count:4d} samples")
     else:
-        print("  ❌ sanitized_train.jsonl:    Not found")
+        print(f"  ❌ {config['sanitized_data'].name:25s} Not found")
 
     print()
 
     # Recommendations
     print("=" * 80)
-    print("ACTIONS")
+    print("AVAILABLE ACTIONS")
     print("=" * 80)
     print()
 
-    if state["current"] == "original":
-        print("To switch to sanitized dataset:")
-        print("  python dataset_manager.py --update")
+    # Show only the allowed action based on last action
+    if last_action == "update":
+        print("✓ You can REVERT (last action was UPDATE):")
+        print(f"  python dataset_manager.py --revert --train-file {config['active_train']}")
+        print()
+        print("✗ You cannot UPDATE again (already updated)")
+    elif last_action == "revert":
+        print("✓ You can UPDATE (last action was REVERT):")
+        print(f"  python dataset_manager.py --update --train-file {config['active_train']}")
+        print()
+        print("✗ You cannot REVERT again (already reverted)")
     else:
-        print("To revert to original dataset:")
-        print("  python dataset_manager.py --revert")
+        # No previous action - allow either
+        if state["current"] == "original":
+            print("✓ You can UPDATE to sanitized dataset:")
+            print(f"  python dataset_manager.py --update --train-file {config['active_train']}")
+        else:
+            print("✓ You can REVERT to original dataset:")
+            print(f"  python dataset_manager.py --revert --train-file {config['active_train']}")
 
     print()
     print("To view change history:")
@@ -298,9 +372,9 @@ def show_status():
     print()
 
 
-def show_log(lines: int | None = None):
+def show_log(config: dict, lines: int | None = None):
     """Show change log."""
-    if not CONFIG["log_file"].exists():
+    if not config["log_file"].exists():
         print("No changes logged yet.")
         return
 
@@ -309,7 +383,7 @@ def show_log(lines: int | None = None):
     print("=" * 80)
     print()
 
-    with open(CONFIG["log_file"]) as f:
+    with open(config["log_file"]) as f:
         log_lines = f.readlines()
 
     # Show last N lines if specified
@@ -339,11 +413,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Switch to sanitized dataset
+  # Switch to sanitized dataset (default paths)
   python dataset_manager.py --update
   
+  # Switch with custom paths
+  python dataset_manager.py --update \\
+      --train-file data/training/train.jsonl \\
+      --sanitized data/training/sanitized_train.jsonl
+  
   # Revert to original dataset
-  python dataset_manager.py --revert
+  python dataset_manager.py --revert --train-file data/training/train.jsonl
   
   # Check current status
   python dataset_manager.py --status
@@ -353,35 +432,54 @@ Examples:
   
   # View last 10 changes
   python dataset_manager.py --log --lines 10
+
+Safety:
+  - After UPDATE, you can only REVERT
+  - After REVERT, you can only UPDATE
+  - This prevents accidental double-operations
         """,
     )
 
+    # Actions
     parser.add_argument("--update", action="store_true", help="Switch to sanitized dataset")
-
     parser.add_argument("--revert", action="store_true", help="Revert to original dataset")
-
     parser.add_argument("--status", action="store_true", help="Show current dataset status")
-
     parser.add_argument("--log", action="store_true", help="Show change log")
-
     parser.add_argument(
         "--lines", type=int, metavar="N", help="Show last N log entries (use with --log)"
     )
 
+    # Path configuration
+    parser.add_argument(
+        "--train-file",
+        type=str,
+        default=None,
+        help="Path to training file to manage (default: data/training/train.jsonl)",
+    )
+    parser.add_argument(
+        "--sanitized",
+        type=str,
+        default=None,
+        help="Path to sanitized data file (default: data/training/sanitized_train.jsonl)",
+    )
+
     args = parser.parse_args()
+
+    # Build configuration from args
+    config = get_config(args)
 
     # Execute requested action
     if args.update:
-        update_to_sanitized()
+        update_to_sanitized(config)
     elif args.revert:
-        revert_to_original()
+        revert_to_original(config)
     elif args.log:
-        show_log(args.lines)
+        show_log(config, args.lines)
     elif args.status:
-        show_status()
+        show_status(config)
     else:
         # Default: show status
-        show_status()
+        show_status(config)
 
 
 if __name__ == "__main__":
