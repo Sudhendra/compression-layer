@@ -23,6 +23,7 @@ dependencies = [
     "tinker",
     "matplotlib>=3.8.0",
     "dagshub",
+    "mlflow",
 ]
 
 [project.optional-dependencies]
