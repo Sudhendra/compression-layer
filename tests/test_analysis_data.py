@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
-
 
 # Adjust this import to match where you place the script/module.
 # If the file is, e.g., scripts/analysis_data.py:
@@ -189,4 +187,5 @@ def test_generate_report_contains_key_sections():
 
 if __name__ == "__main__":
     import pytest
+
     raise SystemExit(pytest.main([__file__, "-v"]))
