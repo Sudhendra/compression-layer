@@ -33,7 +33,7 @@ def count_tokens(text: str, tokenizer_type: TokenizerType = TokenizerType.OPENAI
         Number of tokens
     """
     enc = get_tokenizer(tokenizer_type)
-    return len(enc.encode(text))
+    return len(enc.encode(text, disallowed_special=()))
 
 
 def count_tokens_multi(text: str) -> dict[str, int]:
